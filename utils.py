@@ -95,19 +95,22 @@ def read_uploaded_file(uploaded_file):
     if frames:
         combined = pd.concat(frames, ignore_index=True, sort=False)
 
-        # Read every real attendance sheet, then remove only duplicate rows.
-        # This protects true repeat attendances on different dates while removing
-        # copied sheets such as "4May2026" and "4May2026 Attendances".
+        # Read every real attendance sheet, then remove duplicate attendance records.
+        # Some workbooks contain both exported sheets and copied/raw sheets for the
+        # same date, for example "4May2026 Attendances" and "4May2026". These
+        # copies may have different AAP counts/ages because the source was exported
+        # at a different time, so those changing fields must NOT be part of the
+        # duplicate key.
+        #
+        # A real repeat attendance is still protected because the date and activity
+        # remain in the key. One senior attending two different activities on the
+        # same date will still count twice, while the same senior/activity/status
+        # copied across duplicate sheets will count once.
         key_cols = [
             "__sheet_date__",
             "Activity Name",
             "Status",
             "Name",
-            "Is Client",
-            "Gender",
-            "AAP Participated count this year",
-            "Age",
-            "Has met KPI (CFS)",
         ]
         key_cols = [c for c in key_cols if c in combined.columns]
         if key_cols:
