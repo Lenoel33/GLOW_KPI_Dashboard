@@ -1,4 +1,5 @@
 import sys
+import json
 from pathlib import Path
 from datetime import timedelta
 
@@ -6,8 +7,11 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+import streamlit.components.v1 as components
+import html as html_lib
 
 APP_DIR = Path(__file__).resolve().parent
+ANON_STORE_PATH = APP_DIR / "stored_dashboard_values.json"
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
@@ -116,7 +120,7 @@ def detect_columns(df: pd.DataFrame) -> dict:
         "age": find_one(["age"]),
         "attendance": find_one(["status", "attendance", "attendance status", "attended"]),
         "kpi": find_one(["has met kpi (cfs)", "kpi", "met kpi"]),
-        "date": find_one(["date", "activity date", "session date", "event date", "programme date", "program date", "start date"]),
+        "date": find_one(["date", "__sheet_date__", "activity date", "session date", "event date", "programme date", "program date", "start date"]),
         "ib_ob": find_one(["ib/ob", "ib_ob", "ib ob", "ibob", "inbound/outbound", "inbound outbound", "client type", "is client"]),
         "capacity": find_one(["capacity", "max capacity", "places", "seats", "limit"]),
     }
@@ -157,6 +161,98 @@ def get_default_index(options, value):
         return 0
 
 
+def _format_cell_for_table(value):
+    """Format values for the in-app sortable HTML tables."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (float, np.floating)):
+        if abs(float(value)) <= 1 and float(value) != 0:
+            return f"{float(value):.1%}"
+        return f"{float(value):,.2f}".rstrip("0").rstrip(".")
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+    return str(value)
+
+
+def sortable_html_table(df: pd.DataFrame, key: str, height: int = 520):
+    """Render a browser-only sortable table so sorting does not rerun Streamlit."""
+    table_id = f"sortable_{key}".replace("-", "_").replace(" ", "_")
+    safe_df = df.copy().replace({np.nan: ""})
+    headers = list(safe_df.columns)
+
+    rows_html = []
+    for _, row in safe_df.iterrows():
+        cells = []
+        for col in headers:
+            raw = row[col]
+            display = _format_cell_for_table(raw)
+            raw_sort = str(raw).replace("%", "").replace(",", "").strip()
+            cells.append(
+                f'<td data-sort="{html_lib.escape(raw_sort)}">{html_lib.escape(display)}</td>'
+            )
+        rows_html.append("<tr>" + "".join(cells) + "</tr>")
+
+    header_html = "".join(
+        f'<th onclick="sortTable_{table_id}({i})"><span>{html_lib.escape(str(col))}</span><span class="sort-hint">↕</span></th>'
+        for i, col in enumerate(headers)
+    )
+
+    html_code = f"""
+    <style>
+      .table-wrap {{
+        max-height: {height}px;
+        overflow: auto;
+        border: 1px solid #E9D6B3;
+        border-radius: 14px;
+        background: white;
+      }}
+      #{table_id} {{ width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }}
+      #{table_id} th {{
+        position: sticky; top: 0; z-index: 2;
+        background: #0D2B45; color: white;
+        padding: 10px 12px; text-align: left; cursor: pointer; user-select: none;
+        white-space: nowrap;
+      }}
+      #{table_id} th:hover {{ background: #164766; }}
+      #{table_id} td {{ padding: 9px 12px; border-bottom: 1px solid #F0E4D2; color: #1f2937; }}
+      #{table_id} tr:nth-child(even) td {{ background: #FFFDF8; }}
+      #{table_id} tr:hover td {{ background: #F7F1E7; }}
+      .sort-hint {{ opacity: 0.75; margin-left: 8px; font-size: 12px; }}
+    </style>
+    <div class="table-wrap">
+      <table id="{table_id}">
+        <thead><tr>{header_html}</tr></thead>
+        <tbody>{''.join(rows_html)}</tbody>
+      </table>
+    </div>
+    <script>
+      const sortState_{table_id} = {{}};
+      function cleanValue_{table_id}(txt) {{
+        if (txt === null || txt === undefined) return "";
+        return String(txt).replace(/,/g, '').replace('%', '').trim();
+      }}
+      function sortTable_{table_id}(colIndex) {{
+        const table = document.getElementById('{table_id}');
+        const tbody = table.tBodies[0];
+        const rows = Array.from(tbody.rows);
+        const asc = !sortState_{table_id}[colIndex];
+        sortState_{table_id}[colIndex] = asc;
+        rows.sort(function(a, b) {{
+          let av = cleanValue_{table_id}(a.cells[colIndex].getAttribute('data-sort') || a.cells[colIndex].innerText);
+          let bv = cleanValue_{table_id}(b.cells[colIndex].getAttribute('data-sort') || b.cells[colIndex].innerText);
+          let an = parseFloat(av);
+          let bn = parseFloat(bv);
+          let bothNumeric = !isNaN(an) && !isNaN(bn) && av !== '' && bv !== '';
+          if (bothNumeric) return asc ? an - bn : bn - an;
+          return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+        }});
+        rows.forEach(r => tbody.appendChild(r));
+      }}
+    </script>
+    """
+    components.html(html_code, height=min(height + 40, 800), scrolling=True)
+
+
 def sortable_table(
     df: pd.DataFrame,
     title: str,
@@ -177,42 +273,21 @@ def sortable_table(
     columns = list(display_df.columns)
     default_sort = default_sort if default_sort in columns else columns[0]
 
-    c1, c2, c3, c4 = st.columns([2.2, 1.4, 1.2, 1.4])
-    with c1:
-        sort_column = st.selectbox("Sort by", columns, index=get_default_index(columns, default_sort), key=f"{key}_sort")
-    with c2:
-        order = st.selectbox(
-            "Order",
-            ["Ascending", "Descending"],
-            index=0 if default_ascending else 1,
-            key=f"{key}_order",
-        )
-    with c3:
-        search_text = st.text_input("Search", value="", key=f"{key}_search")
-    with c4:
-        show_rows = st.selectbox("Rows", [10, 20, 50, 100, "All"], index=1, key=f"{key}_rows")
-
-    if search_text:
-        mask = display_df.astype(str).apply(lambda col: col.str.contains(search_text, case=False, na=False)).any(axis=1)
-        display_df = display_df[mask]
-
-    ascending = order == "Ascending"
     try:
-        sorted_df = display_df.sort_values(by=sort_column, ascending=ascending, kind="mergesort")
+        sorted_df = display_df.sort_values(by=default_sort, ascending=default_ascending, kind="mergesort")
     except Exception:
         sorted_df = display_df
 
-    shown_df = sorted_df if show_rows == "All" else sorted_df.head(int(show_rows))
-    st.dataframe(shown_df, use_container_width=True, hide_index=True)
+    st.caption("Click any column header to sort ascending/descending. This sorts inside the table and will not reset the page.")
+    sortable_html_table(sorted_df, key=key)
     st.download_button(
-        f"Download sorted {title} CSV",
+        f"Download {title} CSV",
         data=sorted_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"{key}_sorted.csv",
+        file_name=f"{key}.csv",
         mime="text/csv",
         key=f"{key}_download",
     )
     return sorted_df
-
 
 def bar_chart(df, x, y, title, color=None, key=None):
     if df.empty or x not in df.columns or y not in df.columns:
@@ -233,6 +308,74 @@ def bar_chart(df, x, y, title, color=None, key=None):
     st.plotly_chart(fig, use_container_width=True, key=key)
 
 
+def make_json_safe(obj):
+    if isinstance(obj, pd.DataFrame):
+        return obj.replace({np.nan: None}).to_dict(orient="records")
+    if isinstance(obj, pd.Series):
+        return obj.replace({np.nan: None}).to_dict()
+    if isinstance(obj, (pd.Timestamp,)):
+        return None if pd.isna(obj) else obj.isoformat()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return None if pd.isna(obj) else float(obj)
+    if isinstance(obj, dict):
+        return {str(k): make_json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [make_json_safe(v) for v in obj]
+    return obj
+
+
+def save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, rec_df):
+    """Persist only aggregate dashboard values. Names/phone numbers are never written."""
+    safe_activity_cols = [
+        "activity", "programme_type", "total_attendances", "unique_seniors",
+        "number_of_sessions", "avg_attendance_per_session", "returning_members",
+        "retention_score", "male_attendances", "unique_male_attendances",
+        "male_pct", "unique_male_pct", "ib_participants", "ob_participants",
+        "sample_note",
+    ]
+    safe_activity_cols = [c for c in safe_activity_cols if c in activity_stats.columns]
+    snapshot = {
+        "saved_at": pd.Timestamp.now().isoformat(),
+        "kpis": kpis,
+        "programme_type_summary": make_json_safe(type_stats),
+        "gender_summary": make_json_safe(gender_unique),
+        "activity_summary": make_json_safe(activity_stats[safe_activity_cols]),
+        "recommendations": make_json_safe(rec_df),
+        "privacy_note": "Only aggregated KPI/chart values are stored. Names and phone numbers are not stored.",
+    }
+    ANON_STORE_PATH.write_text(json.dumps(make_json_safe(snapshot), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_anonymized_snapshot():
+    if not ANON_STORE_PATH.exists():
+        return None
+    try:
+        return json.loads(ANON_STORE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def show_stored_snapshot(snapshot):
+    st.markdown("## Stored KPI Overview")
+    st.caption("Stored values are aggregate-only. No names or phone numbers are saved.")
+    k = snapshot.get("kpis", {})
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Attendances", f"{int(k.get('total_attendances', 0)):,}")
+    c2.metric("Unique Seniors", f"{int(k.get('total_unique_seniors', 0)):,}")
+    c3.metric("Activities", f"{int(k.get('total_activities', 0)):,}")
+    c4.metric("Avg Attendance / Activity", f"{float(k.get('avg_attendance_per_activity', 0)):.1f}")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Male Attendances", f"{int(k.get('male_attendances', 0)):,}")
+    m2.metric("Unique Male Seniors", f"{int(k.get('male_unique_members', 0)):,}")
+    m3.metric("Male Attendance %", f"{float(k.get('male_attendance_pct', 0)):.1%}")
+    m4.metric("Male Unique %", f"{float(k.get('male_unique_pct', 0)):.1%}")
+    activity_saved = pd.DataFrame(snapshot.get("activity_summary", []))
+    if not activity_saved.empty:
+        sortable_table(nice_columns(activity_saved), "Stored Activity Summary", "stored_activity", default_sort="Total Attendances", default_ascending=False)
+
+
 with st.sidebar:
     st.markdown("## Dashboard Controls")
     st.markdown("Upload your attendance file, choose programme type, then generate the dashboard.")
@@ -243,6 +386,11 @@ with st.sidebar:
 uploaded = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "xls", "csv"], accept_multiple_files=False)
 
 if not uploaded:
+    stored_snapshot = load_anonymized_snapshot()
+    if stored_snapshot:
+        show_stored_snapshot(stored_snapshot)
+        st.stop()
+
     st.markdown(
         """
         <div class="section-card">
@@ -251,7 +399,7 @@ if not uploaded:
         <span class="success-pill">2. Confirm column mapping</span>
         <span class="success-pill">3. Generate dashboard</span>
         <span class="success-pill">4. Sort tables and download CSV</span>
-        <p class="small-note">The dashboard reads all Excel sheets automatically and keeps uploaded data only in the current app session.</p>
+        <p class="small-note">The dashboard reads every real attendance sheet and removes duplicate rows. After generation, only aggregated KPI/chart values are stored in the app; names and phone numbers are not stored.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -298,7 +446,15 @@ if activity_source_col and activity_source_col in df_preview.columns:
         default=[a for a in auto_recurring if a in unique_activities],
     )
 
-if not st.button("Clean Data & Generate Dashboard", type="primary", use_container_width=True):
+current_file_id = f"{uploaded.name}-{getattr(uploaded, 'size', 0)}"
+if st.session_state.get("dashboard_file_id") != current_file_id:
+    st.session_state["dashboard_ready"] = False
+    st.session_state["dashboard_file_id"] = current_file_id
+
+if st.button("Clean Data & Generate Dashboard", type="primary", use_container_width=True):
+    st.session_state["dashboard_ready"] = True
+
+if not st.session_state.get("dashboard_ready", False):
     st.stop()
 
 # Clean and map data
@@ -368,6 +524,16 @@ male_attendances = int((df_att["gender_clean"] == "Male").sum())
 male_unique_members = int(df_att[df_att["gender_clean"] == "Male"]["member"].nunique())
 male_attendance_pct = male_attendances / total_attendances if total_attendances else 0
 male_unique_pct = male_unique_members / total_unique_seniors if total_unique_seniors else 0
+kpis = {
+    "total_attendances": total_attendances,
+    "total_unique_seniors": total_unique_seniors,
+    "total_activities": total_activities,
+    "avg_attendance_per_activity": avg_attendance_per_activity,
+    "male_attendances": male_attendances,
+    "male_unique_members": male_unique_members,
+    "male_attendance_pct": male_attendance_pct,
+    "male_unique_pct": male_unique_pct,
+}
 
 st.markdown("## KPI Overview")
 k1, k2, k3, k4 = st.columns(4)
@@ -499,6 +665,8 @@ rec_sorted = sortable_table(
     default_ascending=True,
     help_text="Recommendations are based on attendance, reach, retention, and male participation patterns.",
 )
+save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, rec_df)
+st.caption("Saved aggregate KPI/chart values in the app. Names and phone numbers were not saved.")
 
 if "date" in df_att.columns and not df_att.empty and pd.notna(df_att["date"].max()):
     last_date = df_att["date"].max()

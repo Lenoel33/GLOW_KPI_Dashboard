@@ -1,4 +1,5 @@
 from datetime import datetime
+import re
 import pandas as pd
 
 __all__ = [
@@ -11,12 +12,113 @@ __all__ = [
 ]
 
 
+def _extract_date_from_sheet_name(sheet_name):
+    """Return a parsed date from sheet names like 4May2026 Attendances."""
+    match = re.search(r"(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})", str(sheet_name))
+    if not match:
+        return pd.NaT
+    return pd.to_datetime(" ".join(match.groups()), errors="coerce")
+
+
+def _find_header_row(raw_df):
+    """Find the row containing the real attendance headers."""
+    for idx, row in raw_df.iterrows():
+        values = {str(v).strip().lower() for v in row.dropna().tolist()}
+        if {"activity name", "status", "name"}.issubset(values):
+            return idx
+    return None
+
+
+def _clean_sheet_table(raw_df, sheet_name):
+    """Convert one raw Excel sheet into a clean table, if it is an attendance sheet."""
+    header_row = _find_header_row(raw_df)
+    if header_row is None:
+        return None
+
+    header = raw_df.iloc[header_row].astype(str).str.strip().tolist()
+    data = raw_df.iloc[header_row + 1 :].copy()
+    data.columns = header
+    data = data.loc[:, ~data.columns.astype(str).str.lower().str.startswith("unnamed")]
+    data = data.dropna(how="all")
+
+    # Keep only real attendance columns and ignore calculation blocks pasted on the right.
+    expected = [
+        "Centre",
+        "Activity Name",
+        "Status",
+        "Name",
+        "Is Client",
+        "Within Boundary",
+        "Gender",
+        "AAP Participated count this year",
+        "Age",
+        "CFS",
+        "Created on",
+        "Has met KPI (CFS)",
+    ]
+    keep = [c for c in expected if c in data.columns]
+    if not {"Activity Name", "Status", "Name"}.issubset(set(keep)):
+        return None
+    data = data[keep].copy()
+    data["__sheet__"] = sheet_name
+    data["__sheet_date__"] = _extract_date_from_sheet_name(sheet_name)
+    return data
+
+
 def read_uploaded_file(uploaded_file):
-    """Read CSV or Excel. Excel files are read across all sheets and combined."""
+    """Read CSV or Excel and combine only real attendance tables.
+
+    The workbook can contain Summary, Unique Seniors, Template, duplicated raw sheets,
+    and formula blocks. This reader detects the actual attendance header row and, when
+    sheets with "Attend" in the name exist, uses those sheets only to avoid double-counting.
+    """
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
         return pd.read_csv(uploaded_file), [uploaded_file.name]
 
+    try:
+        raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object, engine="openpyxl")
+    except Exception:
+        raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object)
+
+    skip_terms = ("summary", "unique", "template")
+    candidate_items = [(s, d) for s, d in raw_sheets.items() if not any(t in str(s).lower() for t in skip_terms)]
+
+    frames = []
+    used_sheets = []
+    for sheet_name, raw_df in candidate_items:
+        cleaned = _clean_sheet_table(raw_df, sheet_name)
+        if cleaned is not None and not cleaned.empty:
+            frames.append(cleaned)
+            used_sheets.append(sheet_name)
+
+    if frames:
+        combined = pd.concat(frames, ignore_index=True, sort=False)
+
+        # Read every real attendance sheet, then remove only duplicate rows.
+        # This protects true repeat attendances on different dates while removing
+        # copied sheets such as "4May2026" and "4May2026 Attendances".
+        key_cols = [
+            "__sheet_date__",
+            "Activity Name",
+            "Status",
+            "Name",
+            "Is Client",
+            "Gender",
+            "AAP Participated count this year",
+            "Age",
+            "Has met KPI (CFS)",
+        ]
+        key_cols = [c for c in key_cols if c in combined.columns]
+        if key_cols:
+            dedupe_key = combined[key_cols].copy()
+            for c in key_cols:
+                dedupe_key[c] = dedupe_key[c].astype(str).str.strip().str.lower()
+            combined = combined.loc[~dedupe_key.duplicated()].copy()
+
+        return combined.reset_index(drop=True), used_sheets
+
+    # Last-resort fallback for simple files with headers already on row 1.
     try:
         sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
     except Exception:
@@ -24,6 +126,8 @@ def read_uploaded_file(uploaded_file):
 
     frames = []
     for sheet_name, df in sheets.items():
+        if any(t in str(sheet_name).lower() for t in skip_terms):
+            continue
         df = df.copy()
         df["__sheet__"] = sheet_name
         frames.append(df)
@@ -32,7 +136,6 @@ def read_uploaded_file(uploaded_file):
         return pd.DataFrame(), []
     return pd.concat(frames, ignore_index=True, sort=False), list(sheets.keys())
 
-
 def guess_attended(val):
     """Return True/False from common attendance values."""
     if pd.isna(val):
@@ -40,17 +143,19 @@ def guess_attended(val):
 
     text = str(val).strip().lower()
     positives = {"present", "yes", "attended", "y", "1", "true", "attend", "参加", "出席"}
-    negatives = {"absent", "no", "n", "0", "false", "缺席"}
+    negatives = {"absent", "no", "n", "0", "false", "缺席", "no-show", "no show", "cancelled", "canceled", "cancel"}
 
     if text in positives:
         return True
     if text in negatives:
         return False
+    if any(term in text for term in ["no-show", "no show", "absent", "cancelled", "canceled"]):
+        return False
 
     try:
         return float(text) > 0
     except Exception:
-        return True
+        return False
 
 
 def standardize_date(value):
