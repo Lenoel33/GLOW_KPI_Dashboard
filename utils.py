@@ -65,6 +65,96 @@ def _clean_sheet_table(raw_df, sheet_name):
     return data
 
 
+
+def _parse_summary_count(value):
+    """Parse Summary cells like '18 (62%)', '-', or numeric values into a count."""
+    if pd.isna(value):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value) if float(value).is_integer() else float(value)
+    text = str(value).strip()
+    if not text or text in {"-", "–", "—"}:
+        return 0
+    m = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    if not m:
+        return 0
+    number = float(m.group(1))
+    return int(number) if number.is_integer() else number
+
+
+def _find_summary_header(raw_df):
+    """Find the Summary sheet header row containing the mandatory KPI headers."""
+    required = {"programmes", "attendances", "unique members"}
+    for idx, row in raw_df.iterrows():
+        values = {str(v).strip().lower() for v in row.dropna().tolist()}
+        if required.issubset(values):
+            return idx
+    return None
+
+
+def _read_summary_kpis(raw_sheets):
+    """Return aggregate KPI values from the Summary sheet when available."""
+    summary_name = next((s for s in raw_sheets if str(s).strip().lower() == "summary"), None)
+    if summary_name is None:
+        return {}
+
+    raw = raw_sheets[summary_name]
+    header_row = _find_summary_header(raw)
+    if header_row is None:
+        return {}
+
+    headers = raw.iloc[header_row].astype(str).str.strip().tolist()
+    data = raw.iloc[header_row + 1:].copy()
+    data.columns = headers
+    data = data.dropna(how="all")
+
+    mandatory = [
+        "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
+        "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
+    ]
+    available = [c for c in mandatory if c in data.columns]
+    if not available:
+        return {}
+
+    # Keep rows that look like real dated summary rows.
+    if "Date" in data.columns:
+        date_text = data["Date"].astype(str).str.strip()
+        data = data[date_text.ne("") & date_text.str.lower().ne("nan")]
+
+    def sum_col(col):
+        if col not in data.columns:
+            return 0
+        return sum(_parse_summary_count(v) for v in data[col].tolist())
+
+    programmes = int(sum_col("Programmes"))
+    attendances = int(sum_col("Attendances"))
+    daily_unique_sum = int(sum_col("Unique Members"))
+    ib_count = int(sum_col("IB (%)"))
+    ob_count = int(sum_col("OB (%)"))
+    male_count = int(sum_col("Male (%)"))
+    inactive_count = int(sum_col("Inactive (<=2AAP) (%)"))
+    new_ib = int(sum_col("New IB"))
+    new_ob = int(sum_col("New OB"))
+
+    return {
+        "source": "Summary",
+        "programmes": programmes,
+        "attendances": attendances,
+        "unique_members_daily_sum": daily_unique_sum,
+        "ib_count": ib_count,
+        "ob_count": ob_count,
+        "male_count": male_count,
+        "inactive_count": inactive_count,
+        "new_ib": new_ib,
+        "new_ob": new_ob,
+        "ib_pct": ib_count / daily_unique_sum if daily_unique_sum else 0,
+        "ob_pct": ob_count / daily_unique_sum if daily_unique_sum else 0,
+        "male_pct": male_count / daily_unique_sum if daily_unique_sum else 0,
+        "inactive_pct": inactive_count / daily_unique_sum if daily_unique_sum else 0,
+        "avg_attendance_per_programme": attendances / programmes if programmes else 0,
+    }
+
+
 def read_uploaded_file(uploaded_file):
     """Read CSV or Excel and combine only real attendance tables.
 
@@ -80,6 +170,8 @@ def read_uploaded_file(uploaded_file):
         raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object, engine="openpyxl")
     except Exception:
         raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object)
+
+    summary_kpis = _read_summary_kpis(raw_sheets)
 
     skip_terms = ("summary", "unique", "template")
     candidate_items = [(s, d) for s, d in raw_sheets.items() if not any(t in str(s).lower() for t in skip_terms)]
@@ -119,7 +211,9 @@ def read_uploaded_file(uploaded_file):
                 dedupe_key[c] = dedupe_key[c].astype(str).str.strip().str.lower()
             combined = combined.loc[~dedupe_key.duplicated()].copy()
 
-        return combined.reset_index(drop=True), used_sheets
+        out = combined.reset_index(drop=True)
+        out.attrs["summary_kpis"] = summary_kpis
+        return out, used_sheets
 
     # Last-resort fallback for simple files with headers already on row 1.
     try:
@@ -136,8 +230,12 @@ def read_uploaded_file(uploaded_file):
         frames.append(df)
 
     if not frames:
-        return pd.DataFrame(), []
-    return pd.concat(frames, ignore_index=True, sort=False), list(sheets.keys())
+        empty = pd.DataFrame()
+        empty.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+        return empty, []
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    out.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+    return out, list(sheets.keys())
 
 def guess_attended(val):
     """Return True/False from common attendance values."""

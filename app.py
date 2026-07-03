@@ -362,15 +362,20 @@ def show_stored_snapshot(snapshot):
     st.caption("Stored values are aggregate-only. No names or phone numbers are saved.")
     k = snapshot.get("kpis", {})
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Attendances", f"{int(k.get('total_attendances', 0)):,}")
-    c2.metric("Unique Seniors", f"{int(k.get('total_unique_seniors', 0)):,}")
-    c3.metric("Activities", f"{int(k.get('total_activities', 0)):,}")
-    c4.metric("Avg Attendance / Activity", f"{float(k.get('avg_attendance_per_activity', 0)):.1f}")
+    c1.metric("Programmes", f"{int(k.get('total_activities', 0)):,}")
+    c2.metric("Attendances", f"{int(k.get('total_attendances', 0)):,}")
+    c3.metric("Unique Members", f"{int(k.get('total_unique_seniors', 0)):,}")
+    c4.metric("Avg Attendance / Programme", f"{float(k.get('avg_attendance_per_activity', 0)):.1f}")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Male Attendances", f"{int(k.get('male_attendances', 0)):,}")
-    m2.metric("Unique Male Seniors", f"{int(k.get('male_unique_members', 0)):,}")
-    m3.metric("Male Attendance %", f"{float(k.get('male_attendance_pct', 0)):.1%}")
-    m4.metric("Male Unique %", f"{float(k.get('male_unique_pct', 0)):.1%}")
+    m1.metric("IB (%)", f"{int(k.get('ib_count', 0)):,} ({float(k.get('ib_pct', 0)):.1%})")
+    m2.metric("OB (%)", f"{int(k.get('ob_count', 0)):,} ({float(k.get('ob_pct', 0)):.1%})")
+    m3.metric("Male (%)", f"{int(k.get('male_attendances', 0)):,} ({float(k.get('male_attendance_pct', 0)):.1%})")
+    m4.metric("Inactive (<=2AAP) (%)", f"{int(k.get('inactive_count', 0)):,} ({float(k.get('inactive_pct', 0)):.1%})")
+    n1, n2, n3, n4 = st.columns(4)
+    n1.metric("New IB", f"{int(k.get('new_ib', 0)):,}")
+    n2.metric("New OB", f"{int(k.get('new_ob', 0)):,}")
+    n3.metric("Unique Male Seniors", f"{int(k.get('male_unique_members', 0)):,}")
+    n4.metric("Male Unique %", f"{float(k.get('male_unique_pct', 0)):.1%}")
     activity_saved = pd.DataFrame(snapshot.get("activity_summary", []))
     if not activity_saved.empty:
         sortable_table(nice_columns(activity_saved), "Stored Activity Summary", "stored_activity", default_sort="Total Attendances", default_ascending=False)
@@ -408,6 +413,8 @@ if not uploaded:
 
 with st.spinner("Reading uploaded file..."):
     df_all, sheet_names = read_uploaded_file(uploaded)
+
+summary_kpis = df_all.attrs.get("summary_kpis", {}) if hasattr(df_all, "attrs") else {}
 
 if df_all.empty:
     st.error("The uploaded file appears to be empty.")
@@ -516,14 +523,52 @@ if df_att.empty:
     st.stop()
 
 # KPI Overview
-total_attendances = len(df_att)
-total_unique_seniors = df_att["member"].nunique()
-total_activities = df_att["activity"].nunique()
-avg_attendance_per_activity = total_attendances / total_activities if total_activities else 0
-male_attendances = int((df_att["gender_clean"] == "Male").sum())
-male_unique_members = int(df_att[df_att["gender_clean"] == "Male"]["member"].nunique())
-male_attendance_pct = male_attendances / total_attendances if total_attendances else 0
-male_unique_pct = male_unique_members / total_unique_seniors if total_unique_seniors else 0
+raw_total_attendances = len(df_att)
+raw_total_unique_seniors = df_att["member"].nunique()
+raw_total_activities = df_att["activity"].nunique()
+raw_avg_attendance_per_activity = raw_total_attendances / raw_total_activities if raw_total_activities else 0
+raw_male_attendances = int((df_att["gender_clean"] == "Male").sum())
+raw_male_unique_members = int(df_att[df_att["gender_clean"] == "Male"]["member"].nunique())
+raw_male_attendance_pct = raw_male_attendances / raw_total_attendances if raw_total_attendances else 0
+raw_male_unique_pct = raw_male_unique_members / raw_total_unique_seniors if raw_total_unique_seniors else 0
+
+use_summary_kpis = bool(summary_kpis) and activity_type_filter == "All"
+if use_summary_kpis:
+    total_attendances = int(summary_kpis.get("attendances", 0))
+    total_unique_seniors = int(summary_kpis.get("unique_members_daily_sum", raw_total_unique_seniors))
+    total_activities = int(summary_kpis.get("programmes", raw_total_activities))
+    avg_attendance_per_activity = float(summary_kpis.get("avg_attendance_per_programme", 0))
+    male_attendances = int(summary_kpis.get("male_count", raw_male_attendances))
+    male_unique_members = raw_male_unique_members
+    male_attendance_pct = float(summary_kpis.get("male_pct", 0))
+    male_unique_pct = raw_male_unique_pct
+    ib_count = int(summary_kpis.get("ib_count", 0))
+    ob_count = int(summary_kpis.get("ob_count", 0))
+    inactive_count = int(summary_kpis.get("inactive_count", 0))
+    new_ib = int(summary_kpis.get("new_ib", 0))
+    new_ob = int(summary_kpis.get("new_ob", 0))
+    ib_pct = float(summary_kpis.get("ib_pct", 0))
+    ob_pct = float(summary_kpis.get("ob_pct", 0))
+    inactive_pct = float(summary_kpis.get("inactive_pct", 0))
+else:
+    total_attendances = raw_total_attendances
+    total_unique_seniors = raw_total_unique_seniors
+    total_activities = raw_total_activities
+    avg_attendance_per_activity = raw_avg_attendance_per_activity
+    male_attendances = raw_male_attendances
+    male_unique_members = raw_male_unique_members
+    male_attendance_pct = raw_male_attendance_pct
+    male_unique_pct = raw_male_unique_pct
+    ib_count = int((df_att["ib_ob_clean"] == "IB").sum())
+    ob_count = int((df_att["ib_ob_clean"] == "OB").sum())
+    inactive_count = 0
+    new_ib = 0
+    new_ob = 0
+    denominator = total_unique_seniors if total_unique_seniors else 0
+    ib_pct = ib_count / denominator if denominator else 0
+    ob_pct = ob_count / denominator if denominator else 0
+    inactive_pct = 0
+
 kpis = {
     "total_attendances": total_attendances,
     "total_unique_seniors": total_unique_seniors,
@@ -533,20 +578,40 @@ kpis = {
     "male_unique_members": male_unique_members,
     "male_attendance_pct": male_attendance_pct,
     "male_unique_pct": male_unique_pct,
+    "ib_count": ib_count,
+    "ib_pct": ib_pct,
+    "ob_count": ob_count,
+    "ob_pct": ob_pct,
+    "inactive_count": inactive_count,
+    "inactive_pct": inactive_pct,
+    "new_ib": new_ib,
+    "new_ob": new_ob,
+    "kpi_source": "Summary sheet" if use_summary_kpis else "Cleaned attendance rows",
 }
 
 st.markdown("## KPI Overview")
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Total Attendances", f"{total_attendances:,}")
-k2.metric("Unique Seniors", f"{total_unique_seniors:,}")
-k3.metric("Activities", f"{total_activities:,}")
-k4.metric("Avg Attendance / Activity", f"{avg_attendance_per_activity:.1f}")
+if use_summary_kpis:
+    st.caption("KPI Overview is using the workbook Summary sheet. Activity tables/charts still use cleaned attendance rows with duplicate records removed.")
+else:
+    st.caption("KPI Overview is using cleaned attendance rows because a programme-type filter is active or no Summary sheet was found.")
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Male Attendances", f"{male_attendances:,}")
-m2.metric("Unique Male Seniors", f"{male_unique_members:,}")
-m3.metric("Male Attendance %", f"{male_attendance_pct:.1%}")
-m4.metric("Male Unique %", f"{male_unique_pct:.1%}")
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("Programmes", f"{total_activities:,}")
+k2.metric("Attendances", f"{total_attendances:,}")
+k3.metric("Unique Members", f"{total_unique_seniors:,}")
+k4.metric("Avg Attendance / Programme", f"{avg_attendance_per_activity:.1f}")
+
+b1, b2, b3, b4 = st.columns(4)
+b1.metric("IB (%)", f"{ib_count:,} ({ib_pct:.1%})")
+b2.metric("OB (%)", f"{ob_count:,} ({ob_pct:.1%})")
+b3.metric("Male (%)", f"{male_attendances:,} ({male_attendance_pct:.1%})")
+b4.metric("Inactive (<=2AAP) (%)", f"{inactive_count:,} ({inactive_pct:.1%})")
+
+n1, n2, n3, n4 = st.columns(4)
+n1.metric("New IB", f"{new_ib:,}")
+n2.metric("New OB", f"{new_ob:,}")
+n3.metric("Unique Male Seniors", f"{male_unique_members:,}")
+n4.metric("Male Unique %", f"{male_unique_pct:.1%}")
 
 st.markdown("## Quick Visual Summary")
 vc1, vc2 = st.columns(2)
