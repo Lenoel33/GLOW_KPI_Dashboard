@@ -93,7 +93,14 @@ def _find_summary_header(raw_df):
 
 
 def _read_summary_kpis(raw_sheets):
-    """Return aggregate KPI values from the Summary sheet when available."""
+    """Return aggregate KPI values from the Summary sheet when available.
+
+    The Summary sheet is treated as the source of truth for the KPI Overview.
+    Priority order:
+    1. The row where Date/label contains "OVERALL TOTAL".
+    2. If no overall row exists, sum only the monthly total rows.
+    3. If neither exists, sum the daily dated rows only.
+    """
     summary_name = next((s for s in raw_sheets if str(s).strip().lower() == "summary"), None)
     if summary_name is None:
         return {}
@@ -112,23 +119,40 @@ def _read_summary_kpis(raw_sheets):
         "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
         "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
     ]
-    available = [c for c in mandatory if c in data.columns]
-    if not available:
+    if not any(c in data.columns for c in mandatory):
         return {}
 
-    # Keep rows that look like real dated summary rows.
-    if "Date" in data.columns:
-        date_text = data["Date"].astype(str).str.strip()
-        data = data[date_text.ne("") & date_text.str.lower().ne("nan")]
+    if "Date" not in data.columns:
+        return {}
+
+    date_text = data["Date"].astype(str).str.strip()
+
+    # Source of truth: use the explicit OVERALL TOTAL row when present.
+    overall_rows = data[date_text.str.upper().str.contains("OVERALL TOTAL", na=False)].copy()
+    source_detail = "Summary OVERALL TOTAL row"
+
+    if not overall_rows.empty:
+        selected = overall_rows.tail(1)
+    else:
+        # Fallback: sum rows like MAY TOTAL / JUNE TOTAL only.
+        monthly_rows = data[date_text.str.upper().str.contains("TOTAL", na=False)].copy()
+        if not monthly_rows.empty:
+            selected = monthly_rows
+            source_detail = "Summary monthly total rows"
+        else:
+            # Final fallback: sum only rows that look like actual dates.
+            parsed_dates = pd.to_datetime(date_text, errors="coerce")
+            selected = data[parsed_dates.notna()].copy()
+            source_detail = "Summary dated rows"
 
     def sum_col(col):
-        if col not in data.columns:
+        if col not in selected.columns:
             return 0
-        return sum(_parse_summary_count(v) for v in data[col].tolist())
+        return sum(_parse_summary_count(v) for v in selected[col].tolist())
 
     programmes = int(sum_col("Programmes"))
     attendances = int(sum_col("Attendances"))
-    daily_unique_sum = int(sum_col("Unique Members"))
+    unique_members = int(sum_col("Unique Members"))
     ib_count = int(sum_col("IB (%)"))
     ob_count = int(sum_col("OB (%)"))
     male_count = int(sum_col("Male (%)"))
@@ -138,22 +162,23 @@ def _read_summary_kpis(raw_sheets):
 
     return {
         "source": "Summary",
+        "source_detail": source_detail,
         "programmes": programmes,
         "attendances": attendances,
-        "unique_members_daily_sum": daily_unique_sum,
+        "unique_members": unique_members,
+        "unique_members_daily_sum": unique_members,
         "ib_count": ib_count,
         "ob_count": ob_count,
         "male_count": male_count,
         "inactive_count": inactive_count,
         "new_ib": new_ib,
         "new_ob": new_ob,
-        "ib_pct": ib_count / daily_unique_sum if daily_unique_sum else 0,
-        "ob_pct": ob_count / daily_unique_sum if daily_unique_sum else 0,
-        "male_pct": male_count / daily_unique_sum if daily_unique_sum else 0,
-        "inactive_pct": inactive_count / daily_unique_sum if daily_unique_sum else 0,
+        "ib_pct": ib_count / unique_members if unique_members else 0,
+        "ob_pct": ob_count / unique_members if unique_members else 0,
+        "male_pct": male_count / unique_members if unique_members else 0,
+        "inactive_pct": inactive_count / unique_members if unique_members else 0,
         "avg_attendance_per_programme": attendances / programmes if programmes else 0,
     }
-
 
 def read_uploaded_file(uploaded_file):
     """Read CSV or Excel and combine only real attendance tables.

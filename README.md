@@ -1,63 +1,29 @@
-# GLOW Programme KPI & Trends Dashboard
+# GLOW KPI Dashboard
 
-A Streamlit dashboard for analysing GLOW activity attendance data from Excel or CSV files.
+## v7 fix
 
-## What is improved
+KPI Overview now reads the mandatory KPI cards directly from the `Summary` sheet `OVERALL TOTAL:` row.
 
-- Fixed `classify_programme_type` import issue.
-- Reads Excel files across all sheets automatically.
-- Lets users map columns manually if headers differ.
-- Separates one-time and recurring programmes.
-- Shows KPI cards for attendance, unique seniors, activities, and male participation.
-- Shows **Male Attendances by Activity** and **Unique Male Attendances by Activity**.
-- Every table has controls for:
-  - Sort by any column
-  - Ascending / Descending order
-  - Search
-  - Number of rows shown
-  - CSV download of the currently sorted table
-- Charts follow the same sorted table order.
-- Cleaner colours, cards, visual layout, and easier-to-read charts.
+Mandatory KPIs supported:
+- Programmes
+- Attendances
+- Unique Members
+- IB (%)
+- OB (%)
+- Male (%)
+- Inactive (<=2AAP) (%)
+- New IB
+- New OB
 
-## Run locally without admin access
+For the uploaded workbook, the KPI Overview should show:
+- Programmes: 83
+- Attendances: 904
+- Unique Members: 240
+- IB: 108 (45.0%)
+- OB: 132 (55.0%)
+- Male: 47 (19.6%)
+- Inactive: 43 (17.9%)
+- New IB: 14
+- New OB: 21
 
-Open PowerShell in this project folder and run:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m streamlit run app.py
-```
-
-If you already activated your virtual environment, you can also run:
-
-```powershell
-python -m streamlit run app.py
-```
-
-## Run on a different localhost port
-
-```powershell
-python -m streamlit run app.py --server.port 8502
-```
-
-Open:
-
-```text
-http://localhost:8502
-```
-
-## Allow colleagues on the same Wi-Fi to access
-
-```powershell
-python -m streamlit run app.py --server.address 0.0.0.0 --server.port 8502
-```
-
-They should open:
-
-```text
-http://YOUR-COMPUTER-IP:8502
-```
-
-Your computer must stay on and connected to the same network.
+Charts and activity tables still use the cleaned attendance sheets, with duplicate attendance rows removed.
