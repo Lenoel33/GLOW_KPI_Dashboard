@@ -1,29 +1,11 @@
-# GLOW KPI Dashboard
+# GLOW KPI Dashboard - Summary KPI v8
 
-## v7 fix
+This version fixes the KPI Overview by using the Excel `Summary` sheet as the source of truth.
 
-KPI Overview now reads the mandatory KPI cards directly from the `Summary` sheet `OVERALL TOTAL:` row.
-
-Mandatory KPIs supported:
-- Programmes
-- Attendances
-- Unique Members
-- IB (%)
-- OB (%)
-- Male (%)
-- Inactive (<=2AAP) (%)
-- New IB
-- New OB
-
-For the uploaded workbook, the KPI Overview should show:
-- Programmes: 83
-- Attendances: 904
-- Unique Members: 240
-- IB: 108 (45.0%)
-- OB: 132 (55.0%)
-- Male: 47 (19.6%)
-- Inactive: 43 (17.9%)
-- New IB: 14
-- New OB: 21
-
-Charts and activity tables still use the cleaned attendance sheets, with duplicate attendance rows removed.
+## What changed
+- KPI Overview reads the `OVERALL TOTAL:` row from `Summary`.
+- Mandatory KPIs displayed: Programmes, Attendances, Unique Members, IB (%), OB (%), Male (%), Inactive (<=2AAP) (%), New IB, New OB.
+- A Summary Sheet KPI Table is shown directly from Excel without recalculating values.
+- Programme type filters only affect charts/tables, not the headline KPI Overview.
+- Attendance sheets are still used for charts and activity insights, with duplicate records removed.
+- Only aggregate KPI/chart values are stored; names and phone numbers are not stored.

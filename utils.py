@@ -92,37 +92,61 @@ def _find_summary_header(raw_df):
     return None
 
 
-def _read_summary_kpis(raw_sheets):
-    """Return aggregate KPI values from the Summary sheet when available.
+def _read_summary_table(raw_sheets):
+    """Read the mandatory KPI table from the Summary sheet.
 
-    The Summary sheet is treated as the source of truth for the KPI Overview.
-    Priority order:
-    1. The row where Date/label contains "OVERALL TOTAL".
-    2. If no overall row exists, sum only the monthly total rows.
-    3. If neither exists, sum the daily dated rows only.
+    This workbook's Summary sheet is the source of truth for headline KPIs.
+    The table can contain multiple monthly sections with repeated headers, so
+    this function finds the header row that contains the mandatory KPI names,
+    keeps all valid rows below it, and ignores repeated header rows/blank rows.
     """
     summary_name = next((s for s in raw_sheets if str(s).strip().lower() == "summary"), None)
     if summary_name is None:
-        return {}
+        return pd.DataFrame()
 
     raw = raw_sheets[summary_name]
     header_row = _find_summary_header(raw)
     if header_row is None:
-        return {}
+        return pd.DataFrame()
 
     headers = raw.iloc[header_row].astype(str).str.strip().tolist()
     data = raw.iloc[header_row + 1:].copy()
     data.columns = headers
     data = data.dropna(how="all")
 
-    mandatory = [
-        "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
-        "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
+    # Keep only the KPI table columns the user needs.
+    cols = [
+        "Month", "Week", "Date", "Programmes", "Attendances", "Unique Members",
+        "IB (%)", "OB (%)", "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
     ]
-    if not any(c in data.columns for c in mandatory):
-        return {}
+    cols = [c for c in cols if c in data.columns]
+    if not cols or "Date" not in cols:
+        return pd.DataFrame()
+    data = data[cols].copy()
 
-    if "Date" not in data.columns:
+    # Remove repeated header rows in later monthly sections and rows that only
+    # contain helper percentages below monthly totals.
+    data = data[data["Date"].astype(str).str.strip().str.lower() != "date"].copy()
+    data = data[data["Date"].notna()].copy()
+    data = data.dropna(how="all")
+
+    # Normalise text spacing, but keep original values such as "18 (62%)".
+    for c in data.columns:
+        if data[c].dtype == object:
+            data[c] = data[c].apply(lambda x: str(x).strip() if not pd.isna(x) else x)
+    return data.reset_index(drop=True)
+
+
+def _read_summary_kpis(raw_sheets):
+    """Return aggregate KPI values from the Summary sheet when available.
+
+    The Summary sheet is treated as the source of truth for the KPI Overview.
+    The dashboard must not recalculate these headline numbers from attendance
+    sheets because duplicate raw sheets and copied sheets can make the totals
+    drift from the workbook's approved Summary.
+    """
+    data = _read_summary_table(raw_sheets)
+    if data.empty or "Date" not in data.columns:
         return {}
 
     date_text = data["Date"].astype(str).str.strip()
@@ -132,15 +156,16 @@ def _read_summary_kpis(raw_sheets):
     source_detail = "Summary OVERALL TOTAL row"
 
     if not overall_rows.empty:
+        # Use the last OVERALL TOTAL row if the workbook has older copies above.
         selected = overall_rows.tail(1)
     else:
-        # Fallback: sum rows like MAY TOTAL / JUNE TOTAL only.
+        # Fallback only if the workbook has no OVERALL TOTAL row.
         monthly_rows = data[date_text.str.upper().str.contains("TOTAL", na=False)].copy()
+        monthly_rows = monthly_rows[~monthly_rows["Date"].astype(str).str.upper().str.contains("OVERALL", na=False)]
         if not monthly_rows.empty:
             selected = monthly_rows
             source_detail = "Summary monthly total rows"
         else:
-            # Final fallback: sum only rows that look like actual dates.
             parsed_dates = pd.to_datetime(date_text, errors="coerce")
             selected = data[parsed_dates.notna()].copy()
             source_detail = "Summary dated rows"
@@ -197,6 +222,7 @@ def read_uploaded_file(uploaded_file):
         raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object)
 
     summary_kpis = _read_summary_kpis(raw_sheets)
+    summary_table = _read_summary_table(raw_sheets)
 
     skip_terms = ("summary", "unique", "template")
     candidate_items = [(s, d) for s, d in raw_sheets.items() if not any(t in str(s).lower() for t in skip_terms)]
@@ -238,6 +264,7 @@ def read_uploaded_file(uploaded_file):
 
         out = combined.reset_index(drop=True)
         out.attrs["summary_kpis"] = summary_kpis
+        out.attrs["summary_table"] = summary_table
         return out, used_sheets
 
     # Last-resort fallback for simple files with headers already on row 1.
@@ -257,9 +284,11 @@ def read_uploaded_file(uploaded_file):
     if not frames:
         empty = pd.DataFrame()
         empty.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+        empty.attrs["summary_table"] = summary_table if "summary_table" in locals() else pd.DataFrame()
         return empty, []
     out = pd.concat(frames, ignore_index=True, sort=False)
     out.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+    out.attrs["summary_table"] = summary_table if "summary_table" in locals() else pd.DataFrame()
     return out, list(sheets.keys())
 
 def guess_attended(val):

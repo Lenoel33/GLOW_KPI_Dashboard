@@ -415,6 +415,7 @@ with st.spinner("Reading uploaded file..."):
     df_all, sheet_names = read_uploaded_file(uploaded)
 
 summary_kpis = df_all.attrs.get("summary_kpis", {}) if hasattr(df_all, "attrs") else {}
+summary_table = df_all.attrs.get("summary_table", pd.DataFrame()) if hasattr(df_all, "attrs") else pd.DataFrame()
 
 if df_all.empty:
     st.error("The uploaded file appears to be empty.")
@@ -532,16 +533,20 @@ raw_male_unique_members = int(df_att[df_att["gender_clean"] == "Male"]["member"]
 raw_male_attendance_pct = raw_male_attendances / raw_total_attendances if raw_total_attendances else 0
 raw_male_unique_pct = raw_male_unique_members / raw_total_unique_seniors if raw_total_unique_seniors else 0
 
-use_summary_kpis = bool(summary_kpis) and activity_type_filter == "All"
+# KPI Overview must always use the workbook Summary sheet when available.
+# Programme-type filters only affect charts and drill-down tables below.
+use_summary_kpis = bool(summary_kpis)
 if use_summary_kpis:
     total_attendances = int(summary_kpis.get("attendances", 0))
-    total_unique_seniors = int(summary_kpis.get("unique_members_daily_sum", raw_total_unique_seniors))
+    total_unique_seniors = int(summary_kpis.get("unique_members", raw_total_unique_seniors))
     total_activities = int(summary_kpis.get("programmes", raw_total_activities))
     avg_attendance_per_activity = float(summary_kpis.get("avg_attendance_per_programme", 0))
+    # Summary columns IB (%), OB (%), Male (%), and Inactive (<=2AAP) (%) store count + percentage.
+    # We display the count from Summary and calculate the percentage using Summary Unique Members.
     male_attendances = int(summary_kpis.get("male_count", raw_male_attendances))
-    male_unique_members = raw_male_unique_members
+    male_unique_members = int(summary_kpis.get("male_count", raw_male_unique_members))
     male_attendance_pct = float(summary_kpis.get("male_pct", 0))
-    male_unique_pct = raw_male_unique_pct
+    male_unique_pct = float(summary_kpis.get("male_pct", 0))
     ib_count = int(summary_kpis.get("ib_count", 0))
     ob_count = int(summary_kpis.get("ob_count", 0))
     inactive_count = int(summary_kpis.get("inactive_count", 0))
@@ -591,9 +596,9 @@ kpis = {
 
 st.markdown("## KPI Overview")
 if use_summary_kpis:
-    st.caption("KPI Overview is using the workbook Summary sheet. Activity tables/charts still use cleaned attendance rows with duplicate records removed.")
+    st.caption("KPI Overview is using the workbook Summary sheet OVERALL TOTAL row. Activity tables/charts use cleaned attendance rows with duplicate records removed.")
 else:
-    st.caption("KPI Overview is using cleaned attendance rows because a programme-type filter is active or no Summary sheet was found.")
+    st.caption("KPI Overview is using cleaned attendance rows because no Summary sheet / OVERALL TOTAL row was found.")
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Programmes", f"{total_activities:,}")
@@ -612,6 +617,23 @@ n1.metric("New IB", f"{new_ib:,}")
 n2.metric("New OB", f"{new_ob:,}")
 n3.metric("Unique Male Seniors", f"{male_unique_members:,}")
 n4.metric("Male Unique %", f"{male_unique_pct:.1%}")
+
+if use_summary_kpis and isinstance(summary_table, pd.DataFrame) and not summary_table.empty:
+    st.markdown("## Mandatory KPI Table from Summary Sheet")
+    mandatory_cols = [
+        "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
+        "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
+    ]
+    available_cols = [c for c in mandatory_cols if c in summary_table.columns]
+    display_summary = summary_table[available_cols].copy()
+    sortable_table(
+        display_summary,
+        "Summary Sheet KPI Table",
+        "summary_sheet_kpi_table",
+        default_sort="Date",
+        default_ascending=True,
+        help_text="This table is read directly from the Excel Summary sheet. It does not recalculate the KPI values.",
+    )
 
 st.markdown("## Quick Visual Summary")
 vc1, vc2 = st.columns(2)
