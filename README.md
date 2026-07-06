@@ -1,7 +1,29 @@
-# GLOW KPI Dashboard - Multi-Centre v12
+# GLOW KPI Dashboard
 
-Fixes inactive senior logic.
+Upload any attendance Excel file and view centre KPIs, activity trends, male participation, returning members, and inactive seniors.
 
-Inactive Seniors now means: **AAP Participated This Year <= 2**.
+## Important inactive rule
+Inactive seniors are calculated from attendance records:
 
-The old 180-day inactivity rule is removed. The inactive list uses the mapped AAP count column and takes each senior's highest recorded AAP count for the year before applying the <= 2 rule.
+- 0, 1, or 2 attended records = inactive
+- 3 or more attended records = active
+
+This does **not** rely on the imported AAP field.
+
+## Run locally
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
+
+## Upload to GitHub / Streamlit Cloud
+
+Upload these files to your repository:
+
+- app.py
+- utils.py
+- requirements.txt
+- README.md
+
+Then deploy from Streamlit Community Cloud.
