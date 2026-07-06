@@ -1,11 +1,7 @@
-# GLOW KPI Dashboard - Summary KPI v8
+# GLOW KPI Dashboard - Multi-Centre v12
 
-This version fixes the KPI Overview by using the Excel `Summary` sheet as the source of truth.
+Fixes inactive senior logic.
 
-## What changed
-- KPI Overview reads the `OVERALL TOTAL:` row from `Summary`.
-- Mandatory KPIs displayed: Programmes, Attendances, Unique Members, IB (%), OB (%), Male (%), Inactive (<=2AAP) (%), New IB, New OB.
-- A Summary Sheet KPI Table is shown directly from Excel without recalculating values.
-- Programme type filters only affect charts/tables, not the headline KPI Overview.
-- Attendance sheets are still used for charts and activity insights, with duplicate records removed.
-- Only aggregate KPI/chart values are stored; names and phone numbers are not stored.
+Inactive Seniors now means: **AAP Participated This Year <= 2**.
+
+The old 180-day inactivity rule is removed. The inactive list uses the mapped AAP count column and takes each senior's highest recorded AAP count for the year before applying the <= 2 rule.

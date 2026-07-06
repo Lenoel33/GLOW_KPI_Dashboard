@@ -77,10 +77,70 @@ st.markdown(
         font-weight: 700;
         margin: 4px 4px 4px 0;
     }
+    .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 24px;
+        margin: 14px 0 24px 0;
+    }
+    .kpi-card {
+        background: #FFFFFF;
+        border: 1px solid #E9D6B3;
+        border-radius: 18px;
+        padding: 24px 28px;
+        min-height: 140px;
+        box-shadow: 0 6px 18px rgba(13, 43, 69, 0.08);
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        overflow: visible;
+    }
+    .kpi-label {
+        color: #55623B;
+        font-weight: 700;
+        font-size: 1.02rem;
+        line-height: 1.2;
+        margin-bottom: 14px;
+        white-space: normal;
+    }
+    .kpi-value {
+        color: #0D2B45;
+        font-weight: 800;
+        font-size: clamp(2rem, 2.7vw, 3rem);
+        line-height: 1.08;
+        white-space: normal;
+        overflow-wrap: normal;
+        word-break: keep-all;
+    }
+    .kpi-value.long {
+        font-size: clamp(1.65rem, 2.2vw, 2.55rem);
+    }
+    @media (max-width: 1100px) {
+        .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 640px) {
+        .kpi-grid { grid-template-columns: 1fr; gap: 14px; }
+        .kpi-card { min-height: 120px; padding: 20px 22px; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
 )
+
+def render_kpi_cards(cards):
+    """Render KPI cards without Streamlit metric truncation/cut-off."""
+    html_cards = []
+    for label, value in cards:
+        safe_label = html_lib.escape(str(label))
+        safe_value = html_lib.escape(str(value))
+        long_class = " long" if len(str(value)) >= 10 else ""
+        html_cards.append(
+            f'<div class="kpi-card">'
+            f'<div class="kpi-label">{safe_label}</div>'
+            f'<div class="kpi-value{long_class}">{safe_value}</div>'
+            f'</div>'
+        )
+    st.markdown('<div class="kpi-grid">' + ''.join(html_cards) + '</div>', unsafe_allow_html=True)
 
 st.markdown(
     """
@@ -123,6 +183,15 @@ def detect_columns(df: pd.DataFrame) -> dict:
         "date": find_one(["date", "__sheet_date__", "activity date", "session date", "event date", "programme date", "program date", "start date"]),
         "ib_ob": find_one(["ib/ob", "ib_ob", "ib ob", "ibob", "inbound/outbound", "inbound outbound", "client type", "is client"]),
         "capacity": find_one(["capacity", "max capacity", "places", "seats", "limit"]),
+        "aap": find_one([
+            "aap participated count this year",
+            "aap participated this year",
+            "aap participated",
+            "aap count",
+            "aap",
+            "activities participated this year",
+            "programmes participated this year",
+        ]),
     }
 
 
@@ -348,6 +417,70 @@ def save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, re
     ANON_STORE_PATH.write_text(json.dumps(make_json_safe(snapshot), ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+
+
+def infer_centre_name(file_name: str) -> str:
+    """Guess the centre name from the uploaded workbook name."""
+    name = str(file_name).lower()
+    if "bukit" in name or "(bb" in name or " bb" in name or "glow (bb" in name:
+        if "seen" in name:
+            return "SEEN Bukit Batok"
+        return "GLOW Bukit Batok"
+    if "seen" in name and "nanyang" in name:
+        return "SEEN Nanyang"
+    if "glow" in name and "nanyang" in name:
+        return "GLOW Nanyang"
+    stem = Path(str(file_name)).stem.replace("_", " ").replace("-", " ").strip()
+    return stem or "Centre"
+
+
+def combine_summary_kpis(summary_items: dict) -> dict:
+    """Combine centre-level Summary KPIs for the All Centres view."""
+    valid_items = {centre: item for centre, item in summary_items.items() if item}
+    if not valid_items:
+        return {}
+    numeric_keys = [
+        "programmes", "attendances", "unique_members", "ib_count", "ob_count",
+        "male_count", "inactive_count", "new_ib", "new_ob",
+    ]
+    combined = {k: 0 for k in numeric_keys}
+    for item in valid_items.values():
+        for k in numeric_keys:
+            combined[k] += int(item.get(k, 0) or 0)
+    unique_members = combined.get("unique_members", 0)
+    programmes = combined.get("programmes", 0)
+    attendances = combined.get("attendances", 0)
+    combined.update({
+        "source": "Summary",
+        "source_detail": "Combined Summary OVERALL TOTAL rows from selected centre files",
+        "ib_pct": combined["ib_count"] / unique_members if unique_members else 0,
+        "ob_pct": combined["ob_count"] / unique_members if unique_members else 0,
+        "male_pct": combined["male_count"] / unique_members if unique_members else 0,
+        "inactive_pct": combined["inactive_count"] / unique_members if unique_members else 0,
+        "avg_attendance_per_programme": attendances / programmes if programmes else 0,
+    })
+    return combined
+
+
+def make_centre_kpi_table(summary_items: dict) -> pd.DataFrame:
+    rows = []
+    for centre, k in summary_items.items():
+        if not k:
+            continue
+        rows.append({
+            "Centre": centre,
+            "Programmes": int(k.get("programmes", 0) or 0),
+            "Attendances": int(k.get("attendances", 0) or 0),
+            "Unique Members": int(k.get("unique_members", 0) or 0),
+            "IB (%)": f"{int(k.get('ib_count', 0) or 0):,} ({float(k.get('ib_pct', 0) or 0):.1%})",
+            "OB (%)": f"{int(k.get('ob_count', 0) or 0):,} ({float(k.get('ob_pct', 0) or 0):.1%})",
+            "Male (%)": f"{int(k.get('male_count', 0) or 0):,} ({float(k.get('male_pct', 0) or 0):.1%})",
+            "Inactive (<=2AAP) (%)": f"{int(k.get('inactive_count', 0) or 0):,} ({float(k.get('inactive_pct', 0) or 0):.1%})",
+            "New IB": int(k.get("new_ib", 0) or 0),
+            "New OB": int(k.get("new_ob", 0) or 0),
+        })
+    return pd.DataFrame(rows)
+
 def load_anonymized_snapshot():
     if not ANON_STORE_PATH.exists():
         return None
@@ -361,21 +494,20 @@ def show_stored_snapshot(snapshot):
     st.markdown("## Stored KPI Overview")
     st.caption("Stored values are aggregate-only. No names or phone numbers are saved.")
     k = snapshot.get("kpis", {})
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Programmes", f"{int(k.get('total_activities', 0)):,}")
-    c2.metric("Attendances", f"{int(k.get('total_attendances', 0)):,}")
-    c3.metric("Unique Members", f"{int(k.get('total_unique_seniors', 0)):,}")
-    c4.metric("Avg Attendance / Programme", f"{float(k.get('avg_attendance_per_activity', 0)):.1f}")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("IB (%)", f"{int(k.get('ib_count', 0)):,} ({float(k.get('ib_pct', 0)):.1%})")
-    m2.metric("OB (%)", f"{int(k.get('ob_count', 0)):,} ({float(k.get('ob_pct', 0)):.1%})")
-    m3.metric("Male (%)", f"{int(k.get('male_attendances', 0)):,} ({float(k.get('male_attendance_pct', 0)):.1%})")
-    m4.metric("Inactive (<=2AAP) (%)", f"{int(k.get('inactive_count', 0)):,} ({float(k.get('inactive_pct', 0)):.1%})")
-    n1, n2, n3, n4 = st.columns(4)
-    n1.metric("New IB", f"{int(k.get('new_ib', 0)):,}")
-    n2.metric("New OB", f"{int(k.get('new_ob', 0)):,}")
-    n3.metric("Unique Male Seniors", f"{int(k.get('male_unique_members', 0)):,}")
-    n4.metric("Male Unique %", f"{float(k.get('male_unique_pct', 0)):.1%}")
+    render_kpi_cards([
+        ("Programmes", f"{int(k.get('total_activities', 0)):,}"),
+        ("Attendances", f"{int(k.get('total_attendances', 0)):,}"),
+        ("Unique Members", f"{int(k.get('total_unique_seniors', 0)):,}"),
+        ("Avg Attendance / Programme", f"{float(k.get('avg_attendance_per_activity', 0)):.1f}"),
+        ("IB", f"{int(k.get('ib_count', 0)):,} ({float(k.get('ib_pct', 0)):.1%})"),
+        ("OB", f"{int(k.get('ob_count', 0)):,} ({float(k.get('ob_pct', 0)):.1%})"),
+        ("Male", f"{int(k.get('male_attendances', 0)):,} ({float(k.get('male_attendance_pct', 0)):.1%})"),
+        ("Inactive (<=2AAP)", f"{int(k.get('inactive_count', 0)):,} ({float(k.get('inactive_pct', 0)):.1%})"),
+        ("New IB", f"{int(k.get('new_ib', 0)):,}"),
+        ("New OB", f"{int(k.get('new_ob', 0)):,}"),
+        ("Unique Male Seniors", f"{int(k.get('male_unique_members', 0)):,}"),
+        ("Male Unique %", f"{float(k.get('male_unique_pct', 0)):.1%}"),
+    ])
     activity_saved = pd.DataFrame(snapshot.get("activity_summary", []))
     if not activity_saved.empty:
         sortable_table(nice_columns(activity_saved), "Stored Activity Summary", "stored_activity", default_sort="Total Attendances", default_ascending=False)
@@ -388,7 +520,12 @@ with st.sidebar:
     st.divider()
     st.caption(f"Loaded utils from: {utils_module.__file__}")
 
-uploaded = st.file_uploader("Upload Excel or CSV file", type=["xlsx", "xls", "csv"], accept_multiple_files=False)
+uploaded = st.file_uploader(
+    "Upload Excel or CSV file(s)",
+    type=["xlsx", "xls", "csv"],
+    accept_multiple_files=True,
+    help="Upload one workbook per centre. Example: GLOW Bukit Batok, SEEN Bukit Batok, SEEN Nanyang, GLOW Nanyang.",
+)
 
 if not uploaded:
     stored_snapshot = load_anonymized_snapshot()
@@ -400,28 +537,72 @@ if not uploaded:
         """
         <div class="section-card">
         <h3>How to use</h3>
-        <span class="success-pill">1. Upload Excel/CSV</span>
-        <span class="success-pill">2. Confirm column mapping</span>
-        <span class="success-pill">3. Generate dashboard</span>
-        <span class="success-pill">4. Sort tables and download CSV</span>
-        <p class="small-note">The dashboard reads every real attendance sheet and removes duplicate rows. After generation, only aggregated KPI/chart values are stored in the app; names and phone numbers are not stored.</p>
+        <span class="success-pill">1. Upload Excel/CSV for each centre</span>
+        <span class="success-pill">2. Confirm centre names</span>
+        <span class="success-pill">3. Select centre or All Centres</span>
+        <span class="success-pill">4. Generate dashboard</span>
+        <p class="small-note">KPI Overview reads each workbook's Summary sheet. Activity charts use cleaned attendance rows. Only aggregated KPI/chart values are stored; names and phone numbers are not stored.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.stop()
 
-with st.spinner("Reading uploaded file..."):
-    df_all, sheet_names = read_uploaded_file(uploaded)
+with st.sidebar:
+    st.markdown("## Centre Setup")
+    centre_names = []
+    for i, file in enumerate(uploaded):
+        default_name = infer_centre_name(file.name)
+        centre_names.append(
+            st.text_input(
+                f"Centre name for {file.name}",
+                value=default_name,
+                key=f"centre_name_{i}_{file.name}",
+            ).strip() or default_name
+        )
 
-summary_kpis = df_all.attrs.get("summary_kpis", {}) if hasattr(df_all, "attrs") else {}
-summary_table = df_all.attrs.get("summary_table", pd.DataFrame()) if hasattr(df_all, "attrs") else pd.DataFrame()
+centre_frames = {}
+centre_summary_kpis = {}
+centre_summary_tables = {}
+sheet_names_by_centre = {}
 
-if df_all.empty:
-    st.error("The uploaded file appears to be empty.")
+with st.spinner("Reading uploaded file(s)..."):
+    for file, centre_name in zip(uploaded, centre_names):
+        df_one, sheet_names_one = read_uploaded_file(file)
+        if not df_one.empty:
+            df_one = df_one.copy()
+            df_one["centre"] = centre_name
+            centre_frames[centre_name] = df_one
+        centre_summary_kpis[centre_name] = df_one.attrs.get("summary_kpis", {}) if hasattr(df_one, "attrs") else {}
+        summary_one = df_one.attrs.get("summary_table", pd.DataFrame()) if hasattr(df_one, "attrs") else pd.DataFrame()
+        if isinstance(summary_one, pd.DataFrame) and not summary_one.empty:
+            summary_one = summary_one.copy()
+            summary_one.insert(0, "Centre", centre_name)
+        centre_summary_tables[centre_name] = summary_one
+        sheet_names_by_centre[centre_name] = sheet_names_one
+
+if not centre_frames:
+    st.error("The uploaded file(s) appear to be empty or do not contain readable attendance sheets.")
     st.stop()
 
-st.success(f"Read {len(sheet_names)} sheet(s): {', '.join(sheet_names[:6])}")
+centre_options = ["All Centres"] + list(centre_frames.keys())
+selected_centre = st.sidebar.selectbox("View KPI for centre", centre_options, index=0)
+
+if selected_centre == "All Centres":
+    df_all = pd.concat(centre_frames.values(), ignore_index=True, sort=False)
+    summary_kpis = combine_summary_kpis(centre_summary_kpis)
+    summary_tables = [t for t in centre_summary_tables.values() if isinstance(t, pd.DataFrame) and not t.empty]
+    summary_table = pd.concat(summary_tables, ignore_index=True, sort=False) if summary_tables else pd.DataFrame()
+    sheet_names = [s for sheets in sheet_names_by_centre.values() for s in sheets]
+else:
+    df_all = centre_frames[selected_centre].copy()
+    summary_kpis = centre_summary_kpis.get(selected_centre, {})
+    summary_table = centre_summary_tables.get(selected_centre, pd.DataFrame())
+    sheet_names = sheet_names_by_centre.get(selected_centre, [])
+
+centre_kpi_table = make_centre_kpi_table(centre_summary_kpis)
+
+st.success(f"Loaded {len(centre_frames)} centre file(s). Viewing: {selected_centre}. Read {len(sheet_names)} attendance sheet(s).")
 df_preview = normalize_columns(df_all)
 detected = detect_columns(df_preview)
 cols = df_preview.columns.tolist()
@@ -439,6 +620,7 @@ with st.expander("Column Mapping", expanded=True):
         col_age = st.selectbox("Age column", [None] + cols, index=cols.index(detected["age"]) + 1 if detected["age"] in cols else 0)
         col_ib_ob = st.selectbox("IB/OB or client type column", [None] + cols, index=cols.index(detected["ib_ob"]) + 1 if detected["ib_ob"] in cols else 0)
         col_capacity = st.selectbox("Capacity column", [None] + cols, index=cols.index(detected["capacity"]) + 1 if detected["capacity"] in cols else 0)
+        col_aap = st.selectbox("AAP count column for inactive seniors", [None] + cols, index=cols.index(detected["aap"]) + 1 if detected["aap"] in cols else 0)
 
     with st.expander("Detected raw columns"):
         st.write(cols)
@@ -454,7 +636,7 @@ if activity_source_col and activity_source_col in df_preview.columns:
         default=[a for a in auto_recurring if a in unique_activities],
     )
 
-current_file_id = f"{uploaded.name}-{getattr(uploaded, 'size', 0)}"
+current_file_id = "|".join(f"{f.name}-{getattr(f, 'size', 0)}" for f in uploaded) + f"|view={selected_centre}"
 if st.session_state.get("dashboard_file_id") != current_file_id:
     st.session_state["dashboard_ready"] = False
     st.session_state["dashboard_file_id"] = current_file_id
@@ -476,6 +658,7 @@ final_map = {
     "date": col_date or detected.get("date"),
     "ib_ob": col_ib_ob or detected.get("ib_ob"),
     "capacity": col_capacity or detected.get("capacity"),
+    "aap": col_aap or detected.get("aap"),
 }
 
 missing = [name for name in ["activity", "member"] if not final_map.get(name)]
@@ -515,6 +698,9 @@ else:
 
 if "capacity" in df_att.columns:
     df_att["capacity"] = pd.to_numeric(df_att["capacity"], errors="coerce")
+
+if "aap" in df_att.columns:
+    df_att["aap"] = pd.to_numeric(df_att["aap"], errors="coerce")
 
 if activity_type_filter != "All":
     df_att = df_att[df_att["programme_type"] == activity_type_filter].copy()
@@ -600,28 +786,36 @@ if use_summary_kpis:
 else:
     st.caption("KPI Overview is using cleaned attendance rows because no Summary sheet / OVERALL TOTAL row was found.")
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Programmes", f"{total_activities:,}")
-k2.metric("Attendances", f"{total_attendances:,}")
-k3.metric("Unique Members", f"{total_unique_seniors:,}")
-k4.metric("Avg Attendance / Programme", f"{avg_attendance_per_activity:.1f}")
+render_kpi_cards([
+    ("Programmes", f"{total_activities:,}"),
+    ("Attendances", f"{total_attendances:,}"),
+    ("Unique Members", f"{total_unique_seniors:,}"),
+    ("Avg Attendance / Programme", f"{avg_attendance_per_activity:.1f}"),
+    ("IB", f"{ib_count:,} ({ib_pct:.1%})"),
+    ("OB", f"{ob_count:,} ({ob_pct:.1%})"),
+    ("Male", f"{male_attendances:,} ({male_attendance_pct:.1%})"),
+    ("Inactive (<=2AAP)", f"{inactive_count:,} ({inactive_pct:.1%})"),
+    ("New IB", f"{new_ib:,}"),
+    ("New OB", f"{new_ob:,}"),
+    ("Unique Male Seniors", f"{male_unique_members:,}"),
+    ("Male Unique %", f"{male_unique_pct:.1%}"),
+])
 
-b1, b2, b3, b4 = st.columns(4)
-b1.metric("IB (%)", f"{ib_count:,} ({ib_pct:.1%})")
-b2.metric("OB (%)", f"{ob_count:,} ({ob_pct:.1%})")
-b3.metric("Male (%)", f"{male_attendances:,} ({male_attendance_pct:.1%})")
-b4.metric("Inactive (<=2AAP) (%)", f"{inactive_count:,} ({inactive_pct:.1%})")
-
-n1, n2, n3, n4 = st.columns(4)
-n1.metric("New IB", f"{new_ib:,}")
-n2.metric("New OB", f"{new_ob:,}")
-n3.metric("Unique Male Seniors", f"{male_unique_members:,}")
-n4.metric("Male Unique %", f"{male_unique_pct:.1%}")
+if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
+    st.markdown("## Centre KPI Comparison")
+    sortable_table(
+        centre_kpi_table,
+        "Centre KPI Comparison",
+        "centre_kpi_comparison",
+        default_sort="Attendances",
+        default_ascending=False,
+        help_text="This comparison is read from each centre workbook's Summary sheet. No names or phone numbers are stored.",
+    )
 
 if use_summary_kpis and isinstance(summary_table, pd.DataFrame) and not summary_table.empty:
     st.markdown("## Mandatory KPI Table from Summary Sheet")
     mandatory_cols = [
-        "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
+        "Centre", "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
         "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
     ]
     available_cols = [c for c in mandatory_cols if c in summary_table.columns]
@@ -755,15 +949,52 @@ rec_sorted = sortable_table(
 save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, rec_df)
 st.caption("Saved aggregate KPI/chart values in the app. Names and phone numbers were not saved.")
 
-if "date" in df_att.columns and not df_att.empty and pd.notna(df_att["date"].max()):
-    last_date = df_att["date"].max()
-    cutoff = last_date - timedelta(days=180)
-    recent = df_att[df_att["date"] >= cutoff]
-    inactive = sorted(set(df_att["member"].unique()) - set(recent["member"].unique()))
-    inactive_df = pd.DataFrame({"member": inactive})
-    st.markdown("## Inactive Seniors")
-    st.write(f"Based on the latest attendance date in the file, {last_date.date()}, there are {len(inactive)} seniors with no attendance in the last 180 days.")
-    sortable_table(nice_columns(inactive_df), "Inactive Seniors List", "inactive", default_sort="Member", default_ascending=True)
+st.markdown("## Inactive Seniors")
+# Correct inactive definition:
+# A senior is inactive when their AAP Participated count this year is LESS THAN OR EQUAL TO 2.
+# This section must NOT use the old 180-day attendance rule and must NOT filter to only attended rows.
+if "aap" in df.columns:
+    inactive_source = df.dropna(subset=["aap"]).copy()
+    inactive_source["aap"] = pd.to_numeric(inactive_source["aap"], errors="coerce")
+    inactive_source = inactive_source.dropna(subset=["aap"])
+
+    # Keep the selected programme-type filter if the user applied one.
+    if activity_type_filter != "All" and "programme_type" in inactive_source.columns:
+        inactive_source = inactive_source[inactive_source["programme_type"] == activity_type_filter].copy()
+
+    if inactive_source.empty:
+        st.info("No AAP count data found for inactive senior listing.")
+    else:
+        # AAP is a yearly count. If the same senior appears in multiple rows/sheets,
+        # use their highest recorded AAP count for the year so duplicate/older rows do not understate activity.
+        group_fields = {"aap": "max", "activity": "count"}
+        if "date" in inactive_source.columns:
+            group_fields["date"] = "max"
+        if "gender" in inactive_source.columns:
+            group_fields["gender"] = "first"
+
+        inactive_df = inactive_source.groupby("member", as_index=False).agg(group_fields)
+        inactive_df = inactive_df.rename(columns={
+            "member": "Member",
+            "aap": "AAP Participated This Year",
+            "activity": "Total Records",
+            "date": "Last Recorded Date",
+            "gender": "Gender",
+        })
+
+        # This is the key rule: inactive = AAP <= 2.
+        inactive_df = inactive_df[inactive_df["AAP Participated This Year"] <= 2].copy()
+
+        if "Last Recorded Date" in inactive_df.columns:
+            inactive_df["Last Recorded Date"] = pd.to_datetime(inactive_df["Last Recorded Date"], errors="coerce").dt.date
+
+        st.write(
+            f"Inactive seniors are defined as seniors with **AAP Participated This Year ≤ 2**. "
+            f"There are **{len(inactive_df)}** seniors matching this metric in the selected data."
+        )
+        sortable_table(inactive_df, "Inactive Seniors List", "inactive", default_sort="AAP Participated This Year", default_ascending=True)
+else:
+    st.info("No AAP count column was mapped. Please map the AAP count column to show the inactive seniors list.")
 
 st.markdown("## Export Full Activity Summary")
 st.download_button(
