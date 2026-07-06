@@ -1,29 +1,7 @@
 # GLOW KPI Dashboard
 
-Upload any attendance Excel file and view centre KPIs, activity trends, male participation, returning members, and inactive seniors.
+This version keeps the same dashboard UI and changes only the inactive senior logic.
 
-## Important inactive rule
-Inactive seniors are calculated from attendance records:
+Inactive Seniors now means: **Total Records <= 2**.
 
-- 0, 1, or 2 attended records = inactive
-- 3 or more attended records = active
-
-This does **not** rely on the imported AAP field.
-
-## Run locally
-
-```bash
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Upload to GitHub / Streamlit Cloud
-
-Upload these files to your repository:
-
-- app.py
-- utils.py
-- requirements.txt
-- README.md
-
-Then deploy from Streamlit Community Cloud.
+A Total Record is one attended row for the member in the cleaned attendance data.

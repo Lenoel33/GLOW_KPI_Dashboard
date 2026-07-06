@@ -1,194 +1,404 @@
-from __future__ import annotations
-
+from datetime import datetime
 import re
-from typing import Dict, Iterable, List, Optional, Tuple
-
 import pandas as pd
 
-
-COLUMN_ALIASES: Dict[str, List[str]] = {
-    "date": ["date", "attendance date", "session date", "activity date"],
-    "status": ["status", "attendance status", "attended", "attendance"],
-    "name": ["name", "member", "member name", "senior", "client name", "participant", "participant name"],
-    "activity": ["activity", "activity name", "programme", "program", "programme name", "program name", "session"],
-    "is_client": ["is client", "client", "ib", "is ib", "ib/ob", "member type", "client type"],
-    "gender": ["gender", "sex"],
-    "aap": ["aap", "aap participated this year", "aap this year", "aap participated", "active ageing programme"],
-    "centre": ["centre", "center", "site", "location", "aac", "branch"],
-}
+__all__ = [
+    "read_uploaded_file",
+    "guess_attended",
+    "standardize_date",
+    "classify_programme_type",
+    "infer_recurring_activities",
+    "build_recommendations",
+]
 
 
-def _clean_col(value: object) -> str:
-    text = str(value).strip().lower()
-    text = re.sub(r"[^a-z0-9]+", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
+def _extract_date_from_sheet_name(sheet_name):
+    """Return a parsed date from sheet names like 4May2026 Attendances."""
+    match = re.search(r"(\d{1,2})\s*([A-Za-z]+)\s*(\d{4})", str(sheet_name))
+    if not match:
+        return pd.NaT
+    return pd.to_datetime(" ".join(match.groups()), errors="coerce")
 
 
-def _normalise_text(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    return str(value).strip()
-
-
-def _find_column(columns: Iterable[str], aliases: List[str]) -> Optional[str]:
-    cleaned = {_clean_col(c): c for c in columns}
-    alias_cleaned = [_clean_col(a) for a in aliases]
-
-    for alias in alias_cleaned:
-        if alias in cleaned:
-            return cleaned[alias]
-
-    for clean_name, original in cleaned.items():
-        for alias in alias_cleaned:
-            if alias and alias in clean_name:
-                return original
+def _find_header_row(raw_df):
+    """Find the row containing the real attendance headers."""
+    for idx, row in raw_df.iterrows():
+        values = {str(v).strip().lower() for v in row.dropna().tolist()}
+        if {"activity name", "status", "name"}.issubset(values):
+            return idx
     return None
 
 
-def standardise_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename common attendance columns into standard internal names."""
-    result = df.copy()
-    rename_map = {}
-    for standard, aliases in COLUMN_ALIASES.items():
-        found = _find_column(result.columns, aliases)
-        if found:
-            rename_map[found] = standard
-    result = result.rename(columns=rename_map)
-    return result
+def _clean_sheet_table(raw_df, sheet_name):
+    """Convert one raw Excel sheet into a clean table, if it is an attendance sheet."""
+    header_row = _find_header_row(raw_df)
+    if header_row is None:
+        return None
+
+    header = raw_df.iloc[header_row].astype(str).str.strip().tolist()
+    data = raw_df.iloc[header_row + 1 :].copy()
+    data.columns = header
+    data = data.loc[:, ~data.columns.astype(str).str.lower().str.startswith("unnamed")]
+    data = data.dropna(how="all")
+
+    # Keep only real attendance columns and ignore calculation blocks pasted on the right.
+    expected = [
+        "Centre",
+        "Activity Name",
+        "Status",
+        "Name",
+        "Is Client",
+        "Within Boundary",
+        "Gender",
+        "AAP Participated count this year",
+        "Age",
+        "CFS",
+        "Created on",
+        "Has met KPI (CFS)",
+    ]
+    keep = [c for c in expected if c in data.columns]
+    if not {"Activity Name", "Status", "Name"}.issubset(set(keep)):
+        return None
+    data = data[keep].copy()
+    data["__sheet__"] = sheet_name
+    data["__sheet_date__"] = _extract_date_from_sheet_name(sheet_name)
+    return data
 
 
-def read_excel_all_sheets(uploaded_file) -> pd.DataFrame:
-    """Read all sheets from an uploaded Excel file and combine them."""
-    sheets = pd.read_excel(uploaded_file, sheet_name=None)
-    frames = []
-    for sheet_name, sheet_df in sheets.items():
-        if sheet_df is None or sheet_df.empty:
-            continue
-        temp = sheet_df.copy()
-        temp["source_sheet"] = sheet_name
-        frames.append(temp)
-    if not frames:
+
+def _parse_summary_count(value):
+    """Parse Summary cells like '18 (62%)', '-', or numeric values into a count."""
+    if pd.isna(value):
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value) if float(value).is_integer() else float(value)
+    text = str(value).strip()
+    if not text or text in {"-", "–", "—"}:
+        return 0
+    m = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    if not m:
+        return 0
+    number = float(m.group(1))
+    return int(number) if number.is_integer() else number
+
+
+def _find_summary_header(raw_df):
+    """Find the Summary sheet header row containing the mandatory KPI headers."""
+    required = {"programmes", "attendances", "unique members"}
+    for idx, row in raw_df.iterrows():
+        values = {str(v).strip().lower() for v in row.dropna().tolist()}
+        if required.issubset(values):
+            return idx
+    return None
+
+
+def _read_summary_table(raw_sheets):
+    """Read the mandatory KPI table from the Summary sheet.
+
+    This workbook's Summary sheet is the source of truth for headline KPIs.
+    The table can contain multiple monthly sections with repeated headers, so
+    this function finds the header row that contains the mandatory KPI names,
+    keeps all valid rows below it, and ignores repeated header rows/blank rows.
+    """
+    summary_name = next((s for s in raw_sheets if str(s).strip().lower() == "summary"), None)
+    if summary_name is None:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
+
+    raw = raw_sheets[summary_name]
+    header_row = _find_summary_header(raw)
+    if header_row is None:
+        return pd.DataFrame()
+
+    headers = raw.iloc[header_row].astype(str).str.strip().tolist()
+    data = raw.iloc[header_row + 1:].copy()
+    data.columns = headers
+    data = data.dropna(how="all")
+
+    # Keep only the KPI table columns the user needs.
+    cols = [
+        "Month", "Week", "Date", "Programmes", "Attendances", "Unique Members",
+        "IB (%)", "OB (%)", "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
+    ]
+    cols = [c for c in cols if c in data.columns]
+    if not cols or "Date" not in cols:
+        return pd.DataFrame()
+    data = data[cols].copy()
+
+    # Remove repeated header rows in later monthly sections and rows that only
+    # contain helper percentages below monthly totals.
+    data = data[data["Date"].astype(str).str.strip().str.lower() != "date"].copy()
+    data = data[data["Date"].notna()].copy()
+    data = data.dropna(how="all")
+
+    # Normalise text spacing, but keep original values such as "18 (62%)".
+    for c in data.columns:
+        if data[c].dtype == object:
+            data[c] = data[c].apply(lambda x: str(x).strip() if not pd.isna(x) else x)
+    return data.reset_index(drop=True)
 
 
-def prepare_attendance_data(raw_df: pd.DataFrame) -> pd.DataFrame:
-    df = standardise_columns(raw_df)
+def _read_summary_kpis(raw_sheets):
+    """Return aggregate KPI values from the Summary sheet when available.
 
-    required_defaults = {
-        "date": pd.NaT,
-        "status": "Attended",
-        "name": "",
-        "activity": "Unknown Activity",
-        "is_client": "",
-        "gender": "",
-        "aap": pd.NA,
-        "centre": "Unknown Centre",
+    The Summary sheet is treated as the source of truth for the KPI Overview.
+    The dashboard must not recalculate these headline numbers from attendance
+    sheets because duplicate raw sheets and copied sheets can make the totals
+    drift from the workbook's approved Summary.
+    """
+    data = _read_summary_table(raw_sheets)
+    if data.empty or "Date" not in data.columns:
+        return {}
+
+    date_text = data["Date"].astype(str).str.strip()
+
+    # Source of truth: use the explicit OVERALL TOTAL row when present.
+    overall_rows = data[date_text.str.upper().str.contains("OVERALL TOTAL", na=False)].copy()
+    source_detail = "Summary OVERALL TOTAL row"
+
+    if not overall_rows.empty:
+        # Use the last OVERALL TOTAL row if the workbook has older copies above.
+        selected = overall_rows.tail(1)
+    else:
+        # Fallback only if the workbook has no OVERALL TOTAL row.
+        monthly_rows = data[date_text.str.upper().str.contains("TOTAL", na=False)].copy()
+        monthly_rows = monthly_rows[~monthly_rows["Date"].astype(str).str.upper().str.contains("OVERALL", na=False)]
+        if not monthly_rows.empty:
+            selected = monthly_rows
+            source_detail = "Summary monthly total rows"
+        else:
+            parsed_dates = pd.to_datetime(date_text, errors="coerce")
+            selected = data[parsed_dates.notna()].copy()
+            source_detail = "Summary dated rows"
+
+    def sum_col(col):
+        if col not in selected.columns:
+            return 0
+        return sum(_parse_summary_count(v) for v in selected[col].tolist())
+
+    programmes = int(sum_col("Programmes"))
+    attendances = int(sum_col("Attendances"))
+    unique_members = int(sum_col("Unique Members"))
+    ib_count = int(sum_col("IB (%)"))
+    ob_count = int(sum_col("OB (%)"))
+    male_count = int(sum_col("Male (%)"))
+    inactive_count = int(sum_col("Inactive (<=2AAP) (%)"))
+    new_ib = int(sum_col("New IB"))
+    new_ob = int(sum_col("New OB"))
+
+    return {
+        "source": "Summary",
+        "source_detail": source_detail,
+        "programmes": programmes,
+        "attendances": attendances,
+        "unique_members": unique_members,
+        "unique_members_daily_sum": unique_members,
+        "ib_count": ib_count,
+        "ob_count": ob_count,
+        "male_count": male_count,
+        "inactive_count": inactive_count,
+        "new_ib": new_ib,
+        "new_ob": new_ob,
+        "ib_pct": ib_count / unique_members if unique_members else 0,
+        "ob_pct": ob_count / unique_members if unique_members else 0,
+        "male_pct": male_count / unique_members if unique_members else 0,
+        "inactive_pct": inactive_count / unique_members if unique_members else 0,
+        "avg_attendance_per_programme": attendances / programmes if programmes else 0,
     }
-    for col, default in required_defaults.items():
-        if col not in df.columns:
-            df[col] = default
 
-    df["name"] = df["name"].map(_normalise_text)
-    df["activity"] = df["activity"].map(_normalise_text).replace("", "Unknown Activity")
-    df["status"] = df["status"].map(_normalise_text)
-    df["gender"] = df["gender"].map(lambda x: _normalise_text(x).lower())
-    df["centre"] = df["centre"].map(_normalise_text).replace("", "Unknown Centre")
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df["aap"] = pd.to_numeric(df["aap"], errors="coerce")
+def read_uploaded_file(uploaded_file):
+    """Read CSV or Excel and combine only real attendance tables.
 
-    df = df[df["name"].ne("")].copy()
-    return df
+    The workbook can contain Summary, Unique Seniors, Template, duplicated raw sheets,
+    and formula blocks. This reader detects the actual attendance header row and, when
+    sheets with "Attend" in the name exist, uses those sheets only to avoid double-counting.
+    """
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file), [uploaded_file.name]
+
+    try:
+        raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object, engine="openpyxl")
+    except Exception:
+        raw_sheets = pd.read_excel(uploaded_file, sheet_name=None, header=None, dtype=object)
+
+    summary_kpis = _read_summary_kpis(raw_sheets)
+    summary_table = _read_summary_table(raw_sheets)
+
+    skip_terms = ("summary", "unique", "template")
+    candidate_items = [(s, d) for s, d in raw_sheets.items() if not any(t in str(s).lower() for t in skip_terms)]
+
+    frames = []
+    used_sheets = []
+    for sheet_name, raw_df in candidate_items:
+        cleaned = _clean_sheet_table(raw_df, sheet_name)
+        if cleaned is not None and not cleaned.empty:
+            frames.append(cleaned)
+            used_sheets.append(sheet_name)
+
+    if frames:
+        combined = pd.concat(frames, ignore_index=True, sort=False)
+
+        # Read every real attendance sheet, then remove duplicate attendance records.
+        # Some workbooks contain both exported sheets and copied/raw sheets for the
+        # same date, for example "4May2026 Attendances" and "4May2026". These
+        # copies may have different AAP counts/ages because the source was exported
+        # at a different time, so those changing fields must NOT be part of the
+        # duplicate key.
+        #
+        # A real repeat attendance is still protected because the date and activity
+        # remain in the key. One senior attending two different activities on the
+        # same date will still count twice, while the same senior/activity/status
+        # copied across duplicate sheets will count once.
+        key_cols = [
+            "__sheet_date__",
+            "Activity Name",
+            "Status",
+            "Name",
+        ]
+        key_cols = [c for c in key_cols if c in combined.columns]
+        if key_cols:
+            dedupe_key = combined[key_cols].copy()
+            for c in key_cols:
+                dedupe_key[c] = dedupe_key[c].astype(str).str.strip().str.lower()
+            combined = combined.loc[~dedupe_key.duplicated()].copy()
+
+        out = combined.reset_index(drop=True)
+        out.attrs["summary_kpis"] = summary_kpis
+        out.attrs["summary_table"] = summary_table
+        return out, used_sheets
+
+    # Last-resort fallback for simple files with headers already on row 1.
+    try:
+        sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
+    except Exception:
+        sheets = pd.read_excel(uploaded_file, sheet_name=None)
+
+    frames = []
+    for sheet_name, df in sheets.items():
+        if any(t in str(sheet_name).lower() for t in skip_terms):
+            continue
+        df = df.copy()
+        df["__sheet__"] = sheet_name
+        frames.append(df)
+
+    if not frames:
+        empty = pd.DataFrame()
+        empty.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+        empty.attrs["summary_table"] = summary_table if "summary_table" in locals() else pd.DataFrame()
+        return empty, []
+    out = pd.concat(frames, ignore_index=True, sort=False)
+    out.attrs["summary_kpis"] = summary_kpis if "summary_kpis" in locals() else {}
+    out.attrs["summary_table"] = summary_table if "summary_table" in locals() else pd.DataFrame()
+    return out, list(sheets.keys())
+
+def guess_attended(val):
+    """Return True/False from common attendance values."""
+    if pd.isna(val):
+        return False
+
+    text = str(val).strip().lower()
+    positives = {"present", "yes", "attended", "y", "1", "true", "attend", "参加", "出席"}
+    negatives = {"absent", "no", "n", "0", "false", "缺席", "no-show", "no show", "cancelled", "canceled", "cancel"}
+
+    if text in positives:
+        return True
+    if text in negatives:
+        return False
+    if any(term in text for term in ["no-show", "no show", "absent", "cancelled", "canceled"]):
+        return False
+
+    try:
+        return float(text) > 0
+    except Exception:
+        return False
 
 
-def attended_only(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return df.copy()
-    status = df["status"].astype(str).str.strip().str.lower()
-    mask = status.eq("attended") | status.eq("present") | status.eq("yes") | status.eq("1") | status.eq("true")
-    # If no status values look like attended, assume rows in the sheet are attended records.
-    if mask.sum() == 0:
-        return df.copy()
-    return df[mask].copy()
+def standardize_date(value):
+    if pd.isna(value):
+        return pd.NaT
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return pd.to_datetime(value, errors="coerce")
+    return pd.to_datetime(str(value), errors="coerce")
 
 
-def is_ib(value: object) -> bool:
-    text = _normalise_text(value).lower()
-    return text in {"yes", "y", "true", "1", "ib", "client", "inbound"}
+def infer_recurring_activities(df, activity_col="activity", date_col="date"):
+    """Infer recurring activities from multiple sheets or multiple unique dates."""
+    if activity_col not in df.columns:
+        return []
 
-
-def is_ob(value: object) -> bool:
-    text = _normalise_text(value).lower()
-    return text in {"no", "n", "false", "0", "ob", "non client", "non-client", "outbound"}
-
-
-def member_summary(attended_df: pd.DataFrame) -> pd.DataFrame:
-    """Summarise each member. Inactive is based on total attended records <= 2."""
-    if attended_df.empty:
-        return pd.DataFrame(columns=["name", "total_records", "last_attendance", "gender", "is_client", "aap", "inactive"])
-
-    summary = (
-        attended_df.groupby("name", dropna=False)
-        .agg(
-            total_records=("name", "size"),
-            last_attendance=("date", "max"),
-            gender=("gender", "first"),
-            is_client=("is_client", "first"),
-            aap=("aap", "max"),
+    if "__sheet__" in df.columns:
+        counts = (
+            df.dropna(subset=[activity_col, "__sheet__"])
+            .groupby(activity_col)["__sheet__"]
+            .nunique()
         )
-        .reset_index()
-    )
-    summary["inactive"] = summary["total_records"] <= 2
-    return summary
+        recurring = counts[counts > 1].index.tolist()
+        if recurring:
+            return sorted(recurring)
+
+    if date_col and date_col in df.columns:
+        temp = df.copy()
+        temp[date_col] = pd.to_datetime(temp[date_col], errors="coerce")
+        counts = (
+            temp.dropna(subset=[activity_col, date_col])
+            .groupby(activity_col)[date_col]
+            .nunique()
+        )
+        return sorted(counts[counts > 1].index.tolist())
+
+    return []
 
 
-def calculate_kpis(df: pd.DataFrame) -> Tuple[Dict[str, object], pd.DataFrame, pd.DataFrame]:
-    attended = attended_only(df)
-    members = member_summary(attended)
+def classify_programme_type(df, activity_col="activity", date_col="date"):
+    """Return a Series classifying each row as Recurring or One-Time."""
+    if activity_col not in df.columns:
+        return pd.Series(["One-Time"] * len(df), index=df.index, dtype="object")
 
-    total_attendances = len(attended)
-    unique_members = members["name"].nunique() if not members.empty else 0
-    programmes = attended["activity"].nunique() if not attended.empty else 0
-
-    ib_count = int(members["is_client"].map(is_ib).sum()) if not members.empty else 0
-    ob_count = int(members["is_client"].map(is_ob).sum()) if not members.empty else 0
-    male_count = int(members["gender"].astype(str).str.lower().eq("male").sum()) if not members.empty else 0
-    inactive_count = int(members["inactive"].sum()) if not members.empty else 0
-
-    kpis = {
-        "Programmes": programmes,
-        "Attendances": total_attendances,
-        "Unique Members": unique_members,
-        "IB Count": ib_count,
-        "IB %": ib_count / unique_members if unique_members else 0,
-        "OB Count": ob_count,
-        "OB %": ob_count / unique_members if unique_members else 0,
-        "Male Count": male_count,
-        "Male %": male_count / unique_members if unique_members else 0,
-        "Inactive Count": inactive_count,
-        "Inactive %": inactive_count / unique_members if unique_members else 0,
-    }
-    return kpis, attended, members
+    recurring = set(infer_recurring_activities(df, activity_col=activity_col, date_col=date_col))
+    return df[activity_col].apply(lambda x: "Recurring" if x in recurring else "One-Time")
 
 
-def activity_summary(attended_df: pd.DataFrame) -> pd.DataFrame:
-    if attended_df.empty:
-        return pd.DataFrame(columns=["Activity", "Attendances", "Unique Members", "Male Members"])
+def build_recommendations(activity_stats):
+    """Create simple, explainable programme recommendations."""
+    if activity_stats.empty:
+        return pd.DataFrame(columns=["activity", "programme_type", "recommendation", "reason"])
+
+    mean_att = float(activity_stats["total_attendances"].fillna(0).mean())
+    mean_ret = float(activity_stats["retention_score"].fillna(0).mean()) if "retention_score" in activity_stats else 0
+    mean_unique = float(activity_stats["unique_seniors"].fillna(0).mean())
 
     rows = []
-    for activity, group in attended_df.groupby("activity"):
-        member_level = member_summary(group)
+    for _, row in activity_stats.iterrows():
+        activity = row.get("activity", "Unknown")
+        programme_type = row.get("programme_type", "Unknown")
+        total_att = float(row.get("total_attendances", 0) or 0)
+        unique_seniors = float(row.get("unique_seniors", 0) or 0)
+        retention = float(row.get("retention_score", 0) or 0)
+        male_pct = float(row.get("male_pct", 0) or 0)
+
+        if total_att >= mean_att and unique_seniors >= mean_unique:
+            recommendation = "Continue / Scale Up"
+            reason = "Strong attendance and strong reach compared with the programme average."
+        elif total_att < mean_att and unique_seniors < mean_unique:
+            recommendation = "Review Format & Promotion"
+            reason = "Both attendance and unique senior reach are below average."
+        elif programme_type == "Recurring" and retention < mean_ret:
+            recommendation = "Improve Retention"
+            reason = "Attendance exists, but repeat participation is weaker than other recurring programmes."
+        elif male_pct > 0 and male_pct < 0.2:
+            recommendation = "Improve Male Outreach"
+            reason = "Male participation appears low, so promotion or programme design may need adjustment."
+        else:
+            recommendation = "Maintain & Monitor"
+            reason = "Performance is acceptable, but should continue to be monitored."
+
         rows.append(
             {
-                "Activity": activity,
-                "Attendances": len(group),
-                "Unique Members": group["name"].nunique(),
-                "Male Members": int(member_level["gender"].astype(str).str.lower().eq("male").sum()) if not member_level.empty else 0,
-                "Returning Members": int((member_level["total_records"] > 1).sum()) if not member_level.empty else 0,
+                "activity": activity,
+                "programme_type": programme_type,
+                "recommendation": recommendation,
+                "reason": reason,
             }
         )
-    return pd.DataFrame(rows).sort_values(["Attendances", "Unique Members"], ascending=False)
 
-
-def format_count_pct(count: int, pct: float) -> str:
-    return f"{count} ({pct:.0%})"
+    return pd.DataFrame(rows)
