@@ -1049,33 +1049,9 @@ if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
         help_text="This comparison is read from each centre workbook's Summary sheet. No names or phone numbers are stored.",
     )
 
-if use_summary_kpis and isinstance(summary_table, pd.DataFrame) and not summary_table.empty:
-    st.markdown("## Summary Sheet KPI Table")
-    summary_cols = [
-        "Month", "Week", "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
-        "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
-    ]
-    # Show Centre only when viewing multiple centre files. This keeps the single-centre table
-    # looking like the Excel Summary sheet and prevents the centre name from wrapping.
-    if selected_centre == "All Centres" and "Centre" in summary_table.columns:
-        summary_cols = ["Centre"] + summary_cols
-    available_cols = [c for c in summary_cols if c in summary_table.columns]
-    display_summary = summary_table[available_cols].copy()
-    display_summary = display_summary.rename(columns={
-        "IB (%)": "IB",
-        "OB (%)": "OB",
-        "Male (%)": "Male",
-        "Inactive (<=2AAP) (%)": "Inactive (≤2 AAP)",
-    })
-    sortable_table(
-        display_summary,
-        "Summary Sheet KPI Table",
-        "summary_sheet_kpi_table",
-        default_sort="Date",
-        default_ascending=True,
-        help_text="This is displayed directly from the Excel Summary sheet in the same KPI structure. Values are not recalculated.",
-        height=650,
-    )
+# Summary Sheet KPI Table removed.
+# The Summary sheet is still used as the source of truth for KPI Overview cards,
+# but the full Summary table is not displayed to keep the dashboard clean.
 
 if not programme_clean.empty:
     render_programme_dashboard(programme_clean, "Programme-Level KPIs from Other Centre Files")
