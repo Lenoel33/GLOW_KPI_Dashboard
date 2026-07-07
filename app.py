@@ -866,7 +866,13 @@ if activity_source_col and activity_source_col in df_preview.columns:
         default=[a for a in auto_recurring if a in unique_activities],
     )
 
-current_file_id = "|".join(f"{f.name}-{getattr(f, 'size', 0)}" for f in uploaded) + f"|view={selected_centre}"
+current_file_id = (
+    "|".join(
+        [f"attendance:{f.name}-{getattr(f, 'size', 0)}" for f in (attendance_uploaded or [])]
+        + [f"programme:{f.name}-{getattr(f, 'size', 0)}" for f in (programme_uploaded or [])]
+    )
+    + f"|view={selected_centre}"
+)
 if st.session_state.get("dashboard_file_id") != current_file_id:
     st.session_state["dashboard_ready"] = False
     st.session_state["dashboard_file_id"] = current_file_id
