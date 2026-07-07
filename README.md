@@ -1,11 +1,10 @@
-# GLOW KPI Dashboard Multi-Centre v16
+# GLOW KPI Dashboard v17
 
-Changes in this version:
-- Removed the Summary Sheet KPI Table from the dashboard.
-- KPI Overview still reads from the Excel Summary sheet OVERALL TOTAL row.
-- Multi-centre upload remains supported.
-- Programme-level files remain supported.
-- Inactive rule remains: AAP Participated This Year <= 2.
-- No names or phone numbers are stored; only aggregate KPI/chart outputs are cached.
+Fixes KPI Overview showing wrong/stale numbers.
 
-Upload the files inside this folder to GitHub, not the ZIP file itself.
+## What changed
+- KPI Overview is locked to the Excel Summary sheet OVERALL TOTAL row when available.
+- Old stored aggregate values from previous versions are ignored so stale wrong KPI cards will not show.
+- Added a sidebar button to clear stored aggregate KPI values.
+- New stored values are still aggregate-only; no names or phone numbers are stored.
+- Summary Sheet KPI Table remains removed.

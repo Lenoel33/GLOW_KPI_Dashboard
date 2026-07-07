@@ -12,6 +12,7 @@ import html as html_lib
 
 APP_DIR = Path(__file__).resolve().parent
 ANON_STORE_PATH = APP_DIR / "stored_dashboard_values.json"
+SNAPSHOT_SCHEMA_VERSION = 3
 if str(APP_DIR) not in sys.path:
     sys.path.insert(0, str(APP_DIR))
 
@@ -627,9 +628,17 @@ def load_anonymized_snapshot():
     if not ANON_STORE_PATH.exists():
         return None
     try:
-        return json.loads(ANON_STORE_PATH.read_text(encoding="utf-8"))
+        snapshot = json.loads(ANON_STORE_PATH.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+    # Ignore older stored values from previous app versions. Those values may
+    # have been calculated from raw attendance/programme rows instead of the
+    # approved Summary sheet, which caused wrong KPI cards such as 95 programmes
+    # and 1 attendance. New snapshots are saved only after this version runs.
+    if snapshot.get("schema_version") != SNAPSHOT_SCHEMA_VERSION:
+        return None
+    return snapshot
 
 
 def show_stored_snapshot(snapshot):
@@ -1019,9 +1028,10 @@ kpis = {
 
 st.markdown("## KPI Overview")
 if use_summary_kpis:
-    st.caption("KPI Overview is using the workbook Summary sheet OVERALL TOTAL row. Activity tables/charts use cleaned attendance rows with duplicate records removed.")
+    source_detail = summary_kpis.get("source_detail", "Summary sheet") if isinstance(summary_kpis, dict) else "Summary sheet"
+    st.caption(f"KPI Overview is locked to the workbook Summary sheet ({source_detail}). It is not recalculated from raw rows.")
 else:
-    st.caption("KPI Overview is using cleaned attendance rows because no Summary sheet / OVERALL TOTAL row was found.")
+    st.warning("No Summary sheet OVERALL TOTAL row was found for the selected centre. KPI cards are calculated from cleaned attendance rows only.")
 
 render_kpi_cards([
     ("Programmes", f"{total_activities:,}"),
