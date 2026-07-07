@@ -195,6 +195,147 @@ def detect_columns(df: pd.DataFrame) -> dict:
     }
 
 
+def read_general_uploaded_file(uploaded_file):
+    """Read a normal CSV/Excel file where headers are already in the first row.
+
+    This is used for programme-level files from other centres, such as exports with
+    Centre, End Date, Event Domain, Is AAP?, Name of Event, Programmes, Start Date,
+    Status, Target Attendees, and Total Sessions.
+    """
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(uploaded_file)
+        df["__source_sheet__"] = uploaded_file.name
+        return df
+    sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
+    frames = []
+    for sheet_name, df in sheets.items():
+        if df is None or df.empty:
+            continue
+        temp = df.copy().dropna(how="all")
+        if temp.empty:
+            continue
+        temp["__source_sheet__"] = sheet_name
+        frames.append(temp)
+    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+def detect_programme_columns(df: pd.DataFrame) -> dict:
+    """Detect programme-level columns used by other centre exports."""
+    cols = list(df.columns)
+
+    def find_one(candidates):
+        for cand in candidates:
+            for col in cols:
+                if col == cand:
+                    return col
+        for cand in candidates:
+            for col in cols:
+                if cand in col:
+                    return col
+        return None
+
+    return {
+        "centre": find_one(["centre", "center"]),
+        "event_name": find_one(["name of event", "event name", "programme name", "program name", "activity name", "event"]),
+        "programmes": find_one(["programmes", "programs", "programme", "program"]),
+        "start_date": find_one(["start date", "programme start date", "event start date"]),
+        "end_date": find_one(["end date", "programme end date", "event end date"]),
+        "event_domain": find_one(["event domain", "domain", "programme domain", "program domain"]),
+        "is_aap": find_one(["is aap?", "is aap", "aap?", "aap"]),
+        "status": find_one(["status", "event status", "programme status"]),
+        "target_attendees": find_one(["target attendees", "target attendee", "target", "capacity", "expected attendees"]),
+        "total_sessions": find_one(["total sessions", "sessions", "no. of sessions", "number of sessions"]),
+    }
+
+
+def clean_programme_data(df_raw: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Convert programme-level files into one standard structure."""
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame()
+    raw = normalize_columns(df_raw)
+    rename = {source: target for target, source in mapping.items() if source and source in raw.columns}
+    out = raw.rename(columns=rename).copy()
+
+    # If no event name is mapped, fall back to Programmes where available.
+    if "event_name" not in out.columns and "programmes" in out.columns:
+        out["event_name"] = out["programmes"]
+    if "event_name" not in out.columns:
+        return pd.DataFrame()
+
+    out["event_name"] = out["event_name"].astype(str).str.strip()
+    out = out[out["event_name"].notna() & (out["event_name"].astype(str).str.strip() != "")].copy()
+
+    if "centre" not in out.columns:
+        out["centre"] = "Unknown Centre"
+    if "total_sessions" in out.columns:
+        out["total_sessions"] = pd.to_numeric(out["total_sessions"], errors="coerce").fillna(1)
+    else:
+        out["total_sessions"] = 1
+    if "target_attendees" in out.columns:
+        out["target_attendees"] = pd.to_numeric(out["target_attendees"], errors="coerce")
+    else:
+        out["target_attendees"] = np.nan
+    for date_col in ["start_date", "end_date"]:
+        if date_col in out.columns:
+            out[date_col] = pd.to_datetime(out[date_col], errors="coerce")
+    if "is_aap" in out.columns:
+        out["is_aap_clean"] = out["is_aap"].apply(lambda x: "AAP" if str(x).strip().lower() in {"yes", "y", "true", "1", "aap"} else "Non-AAP")
+    else:
+        out["is_aap_clean"] = "Unknown"
+    if "status" in out.columns:
+        out["status_clean"] = out["status"].astype(str).str.strip()
+    else:
+        out["status_clean"] = "Unknown"
+    return out
+
+
+def make_programme_kpis(prog_df: pd.DataFrame) -> dict:
+    if prog_df is None or prog_df.empty:
+        return {}
+    total_programmes = int(prog_df["event_name"].nunique())
+    total_sessions = int(pd.to_numeric(prog_df.get("total_sessions", 1), errors="coerce").fillna(0).sum())
+    target_attendees = pd.to_numeric(prog_df.get("target_attendees", pd.Series(dtype=float)), errors="coerce").sum()
+    aap_programmes = int(prog_df.loc[prog_df.get("is_aap_clean", "") == "AAP", "event_name"].nunique()) if "is_aap_clean" in prog_df.columns else 0
+    non_aap_programmes = int(prog_df.loc[prog_df.get("is_aap_clean", "") == "Non-AAP", "event_name"].nunique()) if "is_aap_clean" in prog_df.columns else 0
+    domains = int(prog_df["event_domain"].nunique()) if "event_domain" in prog_df.columns else 0
+    return {
+        "total_programmes": total_programmes,
+        "total_sessions": total_sessions,
+        "target_attendees": int(target_attendees) if pd.notna(target_attendees) else 0,
+        "avg_sessions_per_programme": total_sessions / total_programmes if total_programmes else 0,
+        "aap_programmes": aap_programmes,
+        "non_aap_programmes": non_aap_programmes,
+        "event_domains": domains,
+    }
+
+
+def render_programme_dashboard(prog_df: pd.DataFrame, title_prefix="Programme-Level KPIs"):
+    """Show KPIs that can be calculated without member-level attendance data."""
+    if prog_df is None or prog_df.empty:
+        return
+    k = make_programme_kpis(prog_df)
+    st.markdown(f"## {title_prefix}")
+    st.caption("These KPIs come from programme-level files. Member KPIs such as Attendances, Unique Members, IB/OB, Male, New IB/OB, and Inactive ≤2 AAP require an attendance/member-level file or a Summary sheet.")
+    render_kpi_cards([
+        ("Programmes", f"{k.get('total_programmes', 0):,}"),
+        ("Total Sessions", f"{k.get('total_sessions', 0):,}"),
+        ("Target Attendees", f"{k.get('target_attendees', 0):,}"),
+        ("Avg Sessions / Programme", f"{k.get('avg_sessions_per_programme', 0):.1f}"),
+        ("AAP Programmes", f"{k.get('aap_programmes', 0):,}"),
+        ("Non-AAP Programmes", f"{k.get('non_aap_programmes', 0):,}"),
+        ("Event Domains", f"{k.get('event_domains', 0):,}"),
+    ])
+    summary_cols = [c for c in ["centre", "event_name", "event_domain", "is_aap_clean", "status_clean", "start_date", "end_date", "target_attendees", "total_sessions"] if c in prog_df.columns]
+    if summary_cols:
+        display = prog_df[summary_cols].copy()
+        display = display.drop_duplicates()
+        sortable_table(nice_columns(display), "Programme File Summary", "programme_file_summary", default_sort="Event Name", default_ascending=True)
+    if "event_domain" in prog_df.columns:
+        domain_stats = prog_df.groupby("event_domain", dropna=False).agg(programmes=("event_name", pd.Series.nunique), total_sessions=("total_sessions", "sum")).reset_index()
+        bar_chart(nice_columns(domain_stats), "Event Domain", "Programmes", "Programmes by Event Domain", key="programme_domain_chart")
+
+
 def clean_gender(value):
     if pd.isna(value):
         return "Unknown"
@@ -520,14 +661,23 @@ with st.sidebar:
     st.divider()
     st.caption(f"Loaded utils from: {utils_module.__file__}")
 
-uploaded = st.file_uploader(
-    "Upload Excel or CSV file(s)",
+attendance_uploaded = st.file_uploader(
+    "Upload attendance / KPI Summary file(s)",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    help="Upload one workbook per centre. Example: GLOW Bukit Batok, SEEN Bukit Batok, SEEN Nanyang, GLOW Nanyang.",
+    key="attendance_files",
+    help="Use this for GLOW Bukit Batok style workbooks with Summary sheet and/or member attendance rows.",
 )
 
-if not uploaded:
+programme_uploaded = st.file_uploader(
+    "Upload programme-level file(s) for other centres",
+    type=["xlsx", "xls", "csv"],
+    accept_multiple_files=True,
+    key="programme_files",
+    help="Use this for files with Centre, Name of Event, Start Date, End Date, Event Domain, Is AAP?, Status, Target Attendees, and Total Sessions.",
+)
+
+if not attendance_uploaded and not programme_uploaded:
     stored_snapshot = load_anonymized_snapshot()
     if stored_snapshot:
         show_stored_snapshot(stored_snapshot)
@@ -537,11 +687,11 @@ if not uploaded:
         """
         <div class="section-card">
         <h3>How to use</h3>
-        <span class="success-pill">1. Upload Excel/CSV for each centre</span>
-        <span class="success-pill">2. Confirm centre names</span>
-        <span class="success-pill">3. Select centre or All Centres</span>
+        <span class="success-pill">1. Upload attendance/KPI Summary files where available</span>
+        <span class="success-pill">2. Upload programme-level files for other centres</span>
+        <span class="success-pill">3. Map columns once in the app</span>
         <span class="success-pill">4. Generate dashboard</span>
-        <p class="small-note">KPI Overview reads each workbook's Summary sheet. Activity charts use cleaned attendance rows. Only aggregated KPI/chart values are stored; names and phone numbers are not stored.</p>
+        <p class="small-note">Attendance files calculate member KPIs. Programme files calculate programme/session/domain KPIs. The app will clearly show when a KPI cannot be calculated because member-level data is missing.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -550,14 +700,25 @@ if not uploaded:
 
 with st.sidebar:
     st.markdown("## Centre Setup")
-    centre_names = []
-    for i, file in enumerate(uploaded):
+    attendance_centre_names = []
+    for i, file in enumerate(attendance_uploaded or []):
         default_name = infer_centre_name(file.name)
-        centre_names.append(
+        attendance_centre_names.append(
             st.text_input(
-                f"Centre name for {file.name}",
+                f"Attendance/Summary centre for {file.name}",
                 value=default_name,
-                key=f"centre_name_{i}_{file.name}",
+                key=f"attendance_centre_name_{i}_{file.name}",
+            ).strip() or default_name
+        )
+
+    programme_centre_names = []
+    for i, file in enumerate(programme_uploaded or []):
+        default_name = infer_centre_name(file.name)
+        programme_centre_names.append(
+            st.text_input(
+                f"Programme file centre for {file.name}",
+                value=default_name,
+                key=f"programme_centre_name_{i}_{file.name}",
             ).strip() or default_name
         )
 
@@ -565,9 +726,10 @@ centre_frames = {}
 centre_summary_kpis = {}
 centre_summary_tables = {}
 sheet_names_by_centre = {}
+programme_frames_raw = {}
 
 with st.spinner("Reading uploaded file(s)..."):
-    for file, centre_name in zip(uploaded, centre_names):
+    for file, centre_name in zip(attendance_uploaded or [], attendance_centre_names):
         df_one, sheet_names_one = read_uploaded_file(file)
         if not df_one.empty:
             df_one = df_one.copy()
@@ -581,28 +743,96 @@ with st.spinner("Reading uploaded file(s)..."):
         centre_summary_tables[centre_name] = summary_one
         sheet_names_by_centre[centre_name] = sheet_names_one
 
-if not centre_frames:
-    st.error("The uploaded file(s) appear to be empty or do not contain readable attendance sheets.")
+    for file, centre_name in zip(programme_uploaded or [], programme_centre_names):
+        prog_raw = read_general_uploaded_file(file)
+        if not prog_raw.empty:
+            prog_raw = prog_raw.copy()
+            # Keep the user-confirmed centre name even if the file has a Centre column.
+            prog_raw["__uploaded_centre__"] = centre_name
+            programme_frames_raw[centre_name] = prog_raw
+
+all_centres = sorted(set(centre_frames.keys()) | set(programme_frames_raw.keys()))
+if not all_centres:
+    st.error("The uploaded file(s) appear to be empty or unreadable.")
     st.stop()
 
-centre_options = ["All Centres"] + list(centre_frames.keys())
+centre_options = ["All Centres"] + all_centres
 selected_centre = st.sidebar.selectbox("View KPI for centre", centre_options, index=0)
 
 if selected_centre == "All Centres":
-    df_all = pd.concat(centre_frames.values(), ignore_index=True, sort=False)
+    df_all = pd.concat(centre_frames.values(), ignore_index=True, sort=False) if centre_frames else pd.DataFrame()
+    programme_raw_all = pd.concat(programme_frames_raw.values(), ignore_index=True, sort=False) if programme_frames_raw else pd.DataFrame()
     summary_kpis = combine_summary_kpis(centre_summary_kpis)
     summary_tables = [t for t in centre_summary_tables.values() if isinstance(t, pd.DataFrame) and not t.empty]
     summary_table = pd.concat(summary_tables, ignore_index=True, sort=False) if summary_tables else pd.DataFrame()
     sheet_names = [s for sheets in sheet_names_by_centre.values() for s in sheets]
 else:
-    df_all = centre_frames[selected_centre].copy()
+    df_all = centre_frames.get(selected_centre, pd.DataFrame()).copy()
+    programme_raw_all = programme_frames_raw.get(selected_centre, pd.DataFrame()).copy()
     summary_kpis = centre_summary_kpis.get(selected_centre, {})
     summary_table = centre_summary_tables.get(selected_centre, pd.DataFrame())
     sheet_names = sheet_names_by_centre.get(selected_centre, [])
 
 centre_kpi_table = make_centre_kpi_table(centre_summary_kpis)
 
-st.success(f"Loaded {len(centre_frames)} centre file(s). Viewing: {selected_centre}. Read {len(sheet_names)} attendance sheet(s).")
+st.success(f"Loaded {len(centre_frames)} attendance/Summary file(s) and {len(programme_frames_raw)} programme-level file(s). Viewing: {selected_centre}. Read {len(sheet_names)} attendance sheet(s).")
+
+# Programme-level mapping. This lets other centre files with fields such as Centre,
+# End Date, Event Domain, Is AAP?, Name of Event, Target Attendees, and Total Sessions
+# contribute useful KPIs even when they do not contain member-level attendance data.
+programme_clean = pd.DataFrame()
+if not programme_raw_all.empty:
+    prog_preview = normalize_columns(programme_raw_all)
+    prog_detected = detect_programme_columns(prog_preview)
+    prog_cols = prog_preview.columns.tolist()
+    with st.expander("Programme File Mapping", expanded=True):
+        st.markdown("Map these columns for SEEN Bukit Batok, SEEN Nanyang, GLOW Nanyang, or other programme-level files.")
+        p_left, p_right = st.columns(2)
+        with p_left:
+            p_centre = st.selectbox("Centre column", [None] + prog_cols, index=prog_cols.index(prog_detected["centre"]) + 1 if prog_detected["centre"] in prog_cols else 0)
+            p_event = st.selectbox("Name of Event column", [None] + prog_cols, index=prog_cols.index(prog_detected["event_name"]) + 1 if prog_detected["event_name"] in prog_cols else 0)
+            p_domain = st.selectbox("Event Domain column", [None] + prog_cols, index=prog_cols.index(prog_detected["event_domain"]) + 1 if prog_detected["event_domain"] in prog_cols else 0)
+            p_is_aap = st.selectbox("Is AAP? column", [None] + prog_cols, index=prog_cols.index(prog_detected["is_aap"]) + 1 if prog_detected["is_aap"] in prog_cols else 0)
+        with p_right:
+            p_start = st.selectbox("Start Date column", [None] + prog_cols, index=prog_cols.index(prog_detected["start_date"]) + 1 if prog_detected["start_date"] in prog_cols else 0)
+            p_end = st.selectbox("End Date column", [None] + prog_cols, index=prog_cols.index(prog_detected["end_date"]) + 1 if prog_detected["end_date"] in prog_cols else 0)
+            p_status = st.selectbox("Status column", [None] + prog_cols, index=prog_cols.index(prog_detected["status"]) + 1 if prog_detected["status"] in prog_cols else 0)
+            p_target = st.selectbox("Target Attendees column", [None] + prog_cols, index=prog_cols.index(prog_detected["target_attendees"]) + 1 if prog_detected["target_attendees"] in prog_cols else 0)
+            p_sessions = st.selectbox("Total Sessions column", [None] + prog_cols, index=prog_cols.index(prog_detected["total_sessions"]) + 1 if prog_detected["total_sessions"] in prog_cols else 0)
+        programme_mapping = {
+            "centre": p_centre or "__uploaded_centre__",
+            "event_name": p_event,
+            "event_domain": p_domain,
+            "is_aap": p_is_aap,
+            "start_date": p_start,
+            "end_date": p_end,
+            "status": p_status,
+            "target_attendees": p_target,
+            "total_sessions": p_sessions,
+        }
+        with st.expander("Detected programme raw columns"):
+            st.write(prog_cols)
+    programme_clean = clean_programme_data(programme_raw_all, programme_mapping)
+
+# If the user only uploaded programme-level files, show what can be calculated and stop
+# before the attendance/member-level sections that require names and attendance status.
+if df_all.empty:
+    render_programme_dashboard(programme_clean, "Programme-Level KPI Overview")
+    mandatory = pd.DataFrame([{
+        "Programmes": make_programme_kpis(programme_clean).get("total_programmes", 0),
+        "Attendances": "Needs attendance/member file or Summary sheet",
+        "Unique Members": "Needs attendance/member file or Summary sheet",
+        "IB (%)": "Needs attendance/member file or Summary sheet",
+        "OB (%)": "Needs attendance/member file or Summary sheet",
+        "Male (%)": "Needs attendance/member file or Summary sheet",
+        "Inactive (<=2AAP) (%)": "Needs attendance/member file or Summary sheet",
+        "New IB": "Needs attendance/member file or Summary sheet",
+        "New OB": "Needs attendance/member file or Summary sheet",
+    }])
+    sortable_table(mandatory, "Mandatory KPI Availability", "mandatory_kpi_availability")
+    st.stop()
+
+
 df_preview = normalize_columns(df_all)
 detected = detect_columns(df_preview)
 cols = df_preview.columns.tolist()
@@ -709,13 +939,6 @@ if df_att.empty:
     st.warning("No attended records found for the selected filters.")
     st.stop()
 
-# Record-based inactive summary.
-# Business rule: each attended row is one attendance record.
-# A senior is inactive when their total attended records in the selected data is <= 2.
-inactive_record_summary = df_att.groupby("member", as_index=False).agg(total_records=("activity", "count"))
-inactive_record_count = int((inactive_record_summary["total_records"] <= 2).sum())
-inactive_record_pct = inactive_record_count / inactive_record_summary["member"].nunique() if inactive_record_summary["member"].nunique() else 0
-
 # KPI Overview
 raw_total_attendances = len(df_att)
 raw_total_unique_seniors = df_att["member"].nunique()
@@ -742,12 +965,12 @@ if use_summary_kpis:
     male_unique_pct = float(summary_kpis.get("male_pct", 0))
     ib_count = int(summary_kpis.get("ib_count", 0))
     ob_count = int(summary_kpis.get("ob_count", 0))
-    inactive_count = inactive_record_count
+    inactive_count = int(summary_kpis.get("inactive_count", 0))
     new_ib = int(summary_kpis.get("new_ib", 0))
     new_ob = int(summary_kpis.get("new_ob", 0))
     ib_pct = float(summary_kpis.get("ib_pct", 0))
     ob_pct = float(summary_kpis.get("ob_pct", 0))
-    inactive_pct = inactive_record_pct
+    inactive_pct = float(summary_kpis.get("inactive_pct", 0))
 else:
     total_attendances = raw_total_attendances
     total_unique_seniors = raw_total_unique_seniors
@@ -759,13 +982,13 @@ else:
     male_unique_pct = raw_male_unique_pct
     ib_count = int((df_att["ib_ob_clean"] == "IB").sum())
     ob_count = int((df_att["ib_ob_clean"] == "OB").sum())
-    inactive_count = inactive_record_count
+    inactive_count = 0
     new_ib = 0
     new_ob = 0
     denominator = total_unique_seniors if total_unique_seniors else 0
     ib_pct = ib_count / denominator if denominator else 0
     ob_pct = ob_count / denominator if denominator else 0
-    inactive_pct = inactive_record_pct
+    inactive_pct = 0
 
 kpis = {
     "total_attendances": total_attendances,
@@ -835,6 +1058,9 @@ if use_summary_kpis and isinstance(summary_table, pd.DataFrame) and not summary_
         default_ascending=True,
         help_text="This table is read directly from the Excel Summary sheet. It does not recalculate the KPI values.",
     )
+
+if not programme_clean.empty:
+    render_programme_dashboard(programme_clean, "Programme-Level KPIs from Other Centre Files")
 
 st.markdown("## Quick Visual Summary")
 vc1, vc2 = st.columns(2)
@@ -958,37 +1184,50 @@ st.caption("Saved aggregate KPI/chart values in the app. Names and phone numbers
 
 st.markdown("## Inactive Seniors")
 # Correct inactive definition:
-# Each attended row is one attendance record.
-# A senior is inactive when their total attended records in the selected data is LESS THAN OR EQUAL TO 2.
-inactive_source = df_att.copy()
+# A senior is inactive when their AAP Participated count this year is LESS THAN OR EQUAL TO 2.
+# This section must NOT use the old 180-day attendance rule and must NOT filter to only attended rows.
+if "aap" in df.columns:
+    inactive_source = df.dropna(subset=["aap"]).copy()
+    inactive_source["aap"] = pd.to_numeric(inactive_source["aap"], errors="coerce")
+    inactive_source = inactive_source.dropna(subset=["aap"])
 
-if inactive_source.empty:
-    st.info("No attended records found for inactive senior listing.")
+    # Keep the selected programme-type filter if the user applied one.
+    if activity_type_filter != "All" and "programme_type" in inactive_source.columns:
+        inactive_source = inactive_source[inactive_source["programme_type"] == activity_type_filter].copy()
+
+    if inactive_source.empty:
+        st.info("No AAP count data found for inactive senior listing.")
+    else:
+        # AAP is a yearly count. If the same senior appears in multiple rows/sheets,
+        # use their highest recorded AAP count for the year so duplicate/older rows do not understate activity.
+        group_fields = {"aap": "max", "activity": "count"}
+        if "date" in inactive_source.columns:
+            group_fields["date"] = "max"
+        if "gender" in inactive_source.columns:
+            group_fields["gender"] = "first"
+
+        inactive_df = inactive_source.groupby("member", as_index=False).agg(group_fields)
+        inactive_df = inactive_df.rename(columns={
+            "member": "Member",
+            "aap": "AAP Participated This Year",
+            "activity": "Total Records",
+            "date": "Last Recorded Date",
+            "gender": "Gender",
+        })
+
+        # This is the key rule: inactive = AAP <= 2.
+        inactive_df = inactive_df[inactive_df["AAP Participated This Year"] <= 2].copy()
+
+        if "Last Recorded Date" in inactive_df.columns:
+            inactive_df["Last Recorded Date"] = pd.to_datetime(inactive_df["Last Recorded Date"], errors="coerce").dt.date
+
+        st.write(
+            f"Inactive seniors are defined as seniors with **AAP Participated This Year ≤ 2**. "
+            f"There are **{len(inactive_df)}** seniors matching this metric in the selected data."
+        )
+        sortable_table(inactive_df, "Inactive Seniors List", "inactive", default_sort="AAP Participated This Year", default_ascending=True)
 else:
-    group_fields = {"activity": "count"}
-    if "date" in inactive_source.columns:
-        group_fields["date"] = "max"
-    if "gender_clean" in inactive_source.columns:
-        group_fields["gender_clean"] = "first"
-
-    inactive_df = inactive_source.groupby("member", as_index=False).agg(group_fields)
-    inactive_df = inactive_df.rename(columns={
-        "member": "Member",
-        "activity": "Total Records",
-        "date": "Last Recorded Date",
-        "gender_clean": "Gender",
-    })
-
-    inactive_df = inactive_df[inactive_df["Total Records"] <= 2].copy()
-
-    if "Last Recorded Date" in inactive_df.columns:
-        inactive_df["Last Recorded Date"] = pd.to_datetime(inactive_df["Last Recorded Date"], errors="coerce").dt.date
-
-    st.write(
-        f"Inactive seniors are defined as seniors with **Total Records ≤ 2**. "
-        f"There are **{len(inactive_df)}** seniors matching this metric in the selected data."
-    )
-    sortable_table(inactive_df, "Inactive Seniors List", "inactive", default_sort="Total Records", default_ascending=True)
+    st.info("No AAP count column was mapped. Please map the AAP count column to show the inactive seniors list.")
 
 st.markdown("## Export Full Activity Summary")
 st.download_button(
