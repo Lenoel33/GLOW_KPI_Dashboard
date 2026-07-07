@@ -82,6 +82,40 @@ def _parse_summary_count(value):
     return int(number) if number.is_integer() else number
 
 
+def _format_summary_date(value):
+    """Format Summary Date cells like Excel display: d/m/yyyy or total text."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return f"{value.day}/{value.month}/{value.year}"
+    text = str(value).strip()
+    # Keep manually typed slash dates exactly as Excel shows them, e.g. 4/5/2026.
+    if "/" in text:
+        return text
+    # Reformat ISO-like dates only.
+    if re.match(r"^\d{4}-\d{1,2}-\d{1,2}", text):
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.notna(parsed):
+            return f"{parsed.day}/{parsed.month}/{parsed.year}"
+    return text
+
+
+def _format_summary_metric(value):
+    """Clean Summary KPI cells for display, e.g. '6(30%)' -> '6 (30%)'."""
+    if pd.isna(value):
+        return ""
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and not float(value).is_integer():
+            return f"{value:.1%}" if 0 <= value <= 1 else f"{value:,.2f}".rstrip("0").rstrip(".")
+        return f"{int(value):,}"
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    text = re.sub(r"(\d)\s*\(", r"\1 (", text)
+    return text
+
+
 def _find_summary_header(raw_df):
     """Find the Summary sheet header row containing the mandatory KPI headers."""
     required = {"programmes", "attendances", "unique members"}
@@ -130,10 +164,12 @@ def _read_summary_table(raw_sheets):
     data = data[data["Date"].notna()].copy()
     data = data.dropna(how="all")
 
-    # Normalise text spacing, but keep original values such as "18 (62%)".
+    # Format the table for display so it mirrors the Excel Summary sheet.
+    if "Date" in data.columns:
+        data["Date"] = data["Date"].apply(_format_summary_date)
     for c in data.columns:
-        if data[c].dtype == object:
-            data[c] = data[c].apply(lambda x: str(x).strip() if not pd.isna(x) else x)
+        if c != "Date":
+            data[c] = data[c].apply(_format_summary_metric)
     return data.reset_index(drop=True)
 
 

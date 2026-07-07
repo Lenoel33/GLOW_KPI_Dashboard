@@ -416,7 +416,7 @@ def sortable_html_table(df: pd.DataFrame, key: str, height: int = 520):
         border-radius: 14px;
         background: white;
       }}
-      #{table_id} {{ width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }}
+      #{table_id} {{ width: max-content; min-width: 100%; border-collapse: collapse; font-family: sans-serif; font-size: 14px; }}
       #{table_id} th {{
         position: sticky; top: 0; z-index: 2;
         background: #0D2B45; color: white;
@@ -424,7 +424,7 @@ def sortable_html_table(df: pd.DataFrame, key: str, height: int = 520):
         white-space: nowrap;
       }}
       #{table_id} th:hover {{ background: #164766; }}
-      #{table_id} td {{ padding: 9px 12px; border-bottom: 1px solid #F0E4D2; color: #1f2937; }}
+      #{table_id} td {{ padding: 9px 12px; border-bottom: 1px solid #F0E4D2; color: #1f2937; white-space: nowrap; vertical-align: middle; }}
       #{table_id} tr:nth-child(even) td {{ background: #FFFDF8; }}
       #{table_id} tr:hover td {{ background: #F7F1E7; }}
       .sort-hint {{ opacity: 0.75; margin-left: 8px; font-size: 12px; }}
@@ -470,6 +470,7 @@ def sortable_table(
     default_sort: str | None = None,
     default_ascending: bool = False,
     help_text: str | None = None,
+    height: int = 520,
 ) -> pd.DataFrame:
     st.markdown(f"### {title}")
     if help_text:
@@ -1049,20 +1050,31 @@ if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
     )
 
 if use_summary_kpis and isinstance(summary_table, pd.DataFrame) and not summary_table.empty:
-    st.markdown("## Mandatory KPI Table from Summary Sheet")
-    mandatory_cols = [
-        "Centre", "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
+    st.markdown("## Summary Sheet KPI Table")
+    summary_cols = [
+        "Month", "Week", "Date", "Programmes", "Attendances", "Unique Members", "IB (%)", "OB (%)",
         "Male (%)", "Inactive (<=2AAP) (%)", "New IB", "New OB",
     ]
-    available_cols = [c for c in mandatory_cols if c in summary_table.columns]
+    # Show Centre only when viewing multiple centre files. This keeps the single-centre table
+    # looking like the Excel Summary sheet and prevents the centre name from wrapping.
+    if selected_centre == "All Centres" and "Centre" in summary_table.columns:
+        summary_cols = ["Centre"] + summary_cols
+    available_cols = [c for c in summary_cols if c in summary_table.columns]
     display_summary = summary_table[available_cols].copy()
+    display_summary = display_summary.rename(columns={
+        "IB (%)": "IB",
+        "OB (%)": "OB",
+        "Male (%)": "Male",
+        "Inactive (<=2AAP) (%)": "Inactive (≤2 AAP)",
+    })
     sortable_table(
         display_summary,
         "Summary Sheet KPI Table",
         "summary_sheet_kpi_table",
         default_sort="Date",
         default_ascending=True,
-        help_text="This table is read directly from the Excel Summary sheet. It does not recalculate the KPI values.",
+        help_text="This is displayed directly from the Excel Summary sheet in the same KPI structure. Values are not recalculated.",
+        height=650,
     )
 
 if not programme_clean.empty:

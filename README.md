@@ -1,16 +1,14 @@
-# GLOW KPI Dashboard - Multi Centre v13
+# GLOW KPI Dashboard
 
-This version supports two input types:
+Version v15 fixes the Summary Sheet KPI table display.
 
-1. Attendance / KPI Summary files
-   - Used for GLOW Bukit Batok style workbooks.
-   - KPI Overview reads the Summary sheet when available.
-   - Member-level KPIs such as Attendances, Unique Members, IB/OB, Male, New IB/OB, and Inactive <=2 AAP require this file type.
+## What changed
 
-2. Programme-level files
-   - Used for other centre exports with fields such as Centre, Name of Event, Start Date, End Date, Event Domain, Is AAP?, Status, Target Attendees, and Total Sessions.
-   - Calculates programme-level KPIs such as Programmes, Total Sessions, Target Attendees, AAP Programmes, Non-AAP Programmes, and Event Domains.
+- Summary KPI table now follows the Excel Summary structure: Month, Week, Date, Programmes, Attendances, Unique Members, IB, OB, Male, Inactive, New IB, New OB.
+- Centre column only appears in the All Centres view, so single-centre Summary tables no longer wrap badly.
+- Dates keep the Excel format, e.g. 4/5/2026.
+- Values such as `6(30%)` are cleaned to `6 (30%)`.
+- Long table values are no longer cut off; the table scrolls horizontally when needed.
+- KPI Overview still reads from the Summary sheet and does not recalculate headline KPI values.
 
-The app includes column mapping so each centre can upload files even when column names differ.
-
-Privacy: only aggregate KPI/chart values are stored. Names and phone numbers are not stored.
+Upload the files inside this folder to GitHub, not the ZIP file itself.
