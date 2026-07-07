@@ -75,7 +75,12 @@ def _parse_summary_count(value):
     text = str(value).strip()
     if not text or text in {"-", "–", "—"}:
         return 0
-    m = re.search(r"(-?\d+(?:\.\d+)?)", text)
+    # Remove thousands separators first. Without this, values formatted
+    # for display such as "1,017" were parsed as 1, which caused
+    # the KPI Overview to show Attendances = 1 even though the
+    # Summary sheet said 1,017.
+    text_for_number = text.replace(",", "")
+    m = re.search(r"(-?\d+(?:\.\d+)?)", text_for_number)
     if not m:
         return 0
     number = float(m.group(1))

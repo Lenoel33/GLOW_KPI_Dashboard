@@ -1,10 +1,10 @@
-# GLOW KPI Dashboard v17
+# GLOW KPI Dashboard - v18 Summary KPI Fix
 
-Fixes KPI Overview showing wrong/stale numbers.
+Fixes the KPI Overview issue where Summary values with thousands separators were parsed incorrectly.
 
-## What changed
-- KPI Overview is locked to the Excel Summary sheet OVERALL TOTAL row when available.
-- Old stored aggregate values from previous versions are ignored so stale wrong KPI cards will not show.
-- Added a sidebar button to clear stored aggregate KPI values.
-- New stored values are still aggregate-only; no names or phone numbers are stored.
-- Summary Sheet KPI Table remains removed.
+Key fix:
+- Summary sheet values like `1,017` now display as `1,017`, not `1`.
+- KPI Overview remains locked to the Summary sheet `OVERALL TOTAL:` row.
+- Charts and detailed tables can still use attendance/programme rows.
+
+Upload the files inside this folder to GitHub. Do not upload the ZIP itself.
