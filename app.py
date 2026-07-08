@@ -667,15 +667,27 @@ def show_stored_snapshot(snapshot):
 with st.sidebar:
     st.markdown("## Dashboard Controls")
     st.markdown("Upload your attendance file, choose programme type, then generate the dashboard.")
+
+    if "upload_reset_counter" not in st.session_state:
+        st.session_state["upload_reset_counter"] = 0
+
+    if st.button("🧹 Clear uploaded data", use_container_width=True, help="Clears the current upload widgets so your next workbook will not mix with the previous one."):
+        st.session_state["upload_reset_counter"] += 1
+        st.session_state["dashboard_ready"] = False
+        st.session_state.pop("dashboard_file_id", None)
+        st.rerun()
+
     activity_type_filter = st.selectbox("Programme Type", ["All", "One-Time", "Recurring"])
     st.divider()
     st.caption(f"Loaded utils from: {utils_module.__file__}")
+
+upload_reset_counter = st.session_state.get("upload_reset_counter", 0)
 
 attendance_uploaded = st.file_uploader(
     "Upload attendance / KPI Summary file(s)",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    key="attendance_files",
+    key=f"attendance_files_{upload_reset_counter}",
     help="Use this for GLOW Bukit Batok style workbooks with Summary sheet and/or member attendance rows.",
 )
 
@@ -683,7 +695,7 @@ programme_uploaded = st.file_uploader(
     "Upload programme-level file(s) for other centres",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    key="programme_files",
+    key=f"programme_files_{upload_reset_counter}",
     help="Use this for files with Centre, Name of Event, Start Date, End Date, Event Domain, Is AAP?, Status, Target Attendees, and Total Sessions.",
 )
 
@@ -1337,10 +1349,28 @@ st.markdown("## Inactive Seniors")
 # Correct inactive definition:
 # A senior is inactive when their AAP Participated count this year is LESS THAN OR EQUAL TO 2.
 # This section must NOT use the old 180-day attendance rule and must NOT filter to only attended rows.
+# The list is separated into IB and OB using the mapped IB/OB or Is Client column.
 if "aap" in df.columns:
     inactive_source = df.dropna(subset=["aap"]).copy()
+    inactive_source = _collapse_duplicate_columns(inactive_source).copy()
     inactive_source["aap"] = pd.to_numeric(inactive_source["aap"], errors="coerce")
     inactive_source = inactive_source.dropna(subset=["aap"])
+
+    if "ib_ob" in inactive_source.columns:
+        inactive_source["ib_ob_clean"] = inactive_source["ib_ob"].apply(clean_ib_ob)
+    elif "ib_ob_clean" not in inactive_source.columns:
+        inactive_source["ib_ob_clean"] = "Unknown"
+
+    if "gender" in inactive_source.columns:
+        inactive_source["gender_clean"] = inactive_source["gender"].apply(clean_gender)
+
+    if "__uploaded_centre__" in inactive_source.columns:
+        uploaded_centre = inactive_source["__uploaded_centre__"].astype(str).str.strip()
+        if "centre" not in inactive_source.columns:
+            inactive_source["centre"] = uploaded_centre
+        else:
+            centre_text = inactive_source["centre"].astype(str).str.strip()
+            inactive_source["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), uploaded_centre)
 
     # Keep the selected programme-type filter if the user applied one.
     if activity_type_filter != "All" and "programme_type" in inactive_source.columns:
@@ -1349,21 +1379,27 @@ if "aap" in df.columns:
     if inactive_source.empty:
         st.info("No AAP count data found for inactive senior listing.")
     else:
+        group_cols = ["member", "ib_ob_clean"]
+        if "centre" in inactive_source.columns:
+            group_cols = ["centre", "member", "ib_ob_clean"]
+
         # AAP is a yearly count. If the same senior appears in multiple rows/sheets,
         # use their highest recorded AAP count for the year so duplicate/older rows do not understate activity.
         group_fields = {"aap": "max", "activity": "count"}
         if "date" in inactive_source.columns:
             group_fields["date"] = "max"
-        if "gender" in inactive_source.columns:
-            group_fields["gender"] = "first"
+        if "gender_clean" in inactive_source.columns:
+            group_fields["gender_clean"] = "first"
 
-        inactive_df = inactive_source.groupby("member", as_index=False).agg(group_fields)
+        inactive_df = inactive_source.groupby(group_cols, as_index=False, dropna=False).agg(group_fields)
         inactive_df = inactive_df.rename(columns={
+            "centre": "Centre",
             "member": "Member",
+            "ib_ob_clean": "Client Type",
             "aap": "AAP Participated This Year",
             "activity": "Total Records",
             "date": "Last Recorded Date",
-            "gender": "Gender",
+            "gender_clean": "Gender",
         })
 
         # This is the key rule: inactive = AAP <= 2.
@@ -1372,11 +1408,30 @@ if "aap" in df.columns:
         if "Last Recorded Date" in inactive_df.columns:
             inactive_df["Last Recorded Date"] = pd.to_datetime(inactive_df["Last Recorded Date"], errors="coerce").dt.date
 
+        ib_inactive_df = inactive_df[inactive_df["Client Type"] == "IB"].copy()
+        ob_inactive_df = inactive_df[inactive_df["Client Type"] == "OB"].copy()
+        unknown_inactive_df = inactive_df[~inactive_df["Client Type"].isin(["IB", "OB"])].copy()
+
         st.write(
             f"Inactive seniors are defined as seniors with **AAP Participated This Year ≤ 2**. "
-            f"There are **{len(inactive_df)}** seniors matching this metric in the selected data."
+            f"IB: **{len(ib_inactive_df)}**, OB: **{len(ob_inactive_df)}**."
         )
-        sortable_table(inactive_df, "Inactive Seniors List", "inactive", default_sort="AAP Participated This Year", default_ascending=True)
+
+        ib_inactive_tab, ob_inactive_tab, unknown_inactive_tab = st.tabs([
+            f"IB Inactive ({len(ib_inactive_df):,})",
+            f"OB Inactive ({len(ob_inactive_df):,})",
+            f"Unknown ({len(unknown_inactive_df):,})",
+        ])
+
+        with ib_inactive_tab:
+            sortable_table(ib_inactive_df, "IB Inactive Seniors List", "inactive_ib", default_sort="AAP Participated This Year", default_ascending=True)
+        with ob_inactive_tab:
+            sortable_table(ob_inactive_df, "OB Inactive Seniors List", "inactive_ob", default_sort="AAP Participated This Year", default_ascending=True)
+        with unknown_inactive_tab:
+            if unknown_inactive_df.empty:
+                st.info("No inactive seniors with unknown IB/OB status.")
+            else:
+                sortable_table(unknown_inactive_df, "Unknown IB/OB Inactive Seniors List", "inactive_unknown", default_sort="AAP Participated This Year", default_ascending=True)
 else:
     st.info("No AAP count column was mapped. Please map the AAP count column to show the inactive seniors list.")
 
