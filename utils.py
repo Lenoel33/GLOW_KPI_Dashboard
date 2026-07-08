@@ -266,7 +266,22 @@ def read_uploaded_file(uploaded_file):
     summary_table = _read_summary_table(raw_sheets)
 
     skip_terms = ("summary", "unique", "template")
-    candidate_items = [(s, d) for s, d in raw_sheets.items() if not any(t in str(s).lower() for t in skip_terms)]
+
+    # Use only the official exported attendance registers.
+    # In GLOW workbooks, approved register tabs are named like
+    # "8May2026 Attendances". Some files also contain copied/import tabs such as
+    # "8May2026" or singular/typo variants like "01July2026 Attendance" /
+    # "29June2026 Attendnace". Those extra tabs can duplicate or inflate the
+    # senior-frequency tables, so they are excluded from member attendance counts.
+    official_attendance_items = [
+        (s, d) for s, d in raw_sheets.items()
+        if re.search(r"\battendances\b", str(s).strip().lower())
+        and not any(t in str(s).lower() for t in skip_terms)
+    ]
+    candidate_items = official_attendance_items or [
+        (s, d) for s, d in raw_sheets.items()
+        if not any(t in str(s).lower() for t in skip_terms)
+    ]
 
     frames = []
     used_sheets = []

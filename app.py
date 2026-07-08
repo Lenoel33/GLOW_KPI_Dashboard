@@ -1059,6 +1059,91 @@ if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
         help_text="This comparison is read from each centre workbook's Summary sheet. No names or phone numbers are stored.",
     )
 
+# Senior attendance frequency by IB/OB status
+def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str) -> pd.DataFrame:
+    """Count attended rows for each senior by IB/OB status."""
+    if source_df is None or source_df.empty or "member" not in source_df.columns or "ib_ob_clean" not in source_df.columns:
+        return pd.DataFrame()
+
+    temp = source_df[source_df["ib_ob_clean"] == status_value].copy()
+    if temp.empty:
+        return pd.DataFrame()
+
+    group_cols = []
+    if "centre" in temp.columns:
+        group_cols.append("centre")
+    group_cols.append("member")
+
+    agg_fields = {
+        "activity": ["count", pd.Series.nunique],
+    }
+    if "date" in temp.columns:
+        agg_fields["date"] = "max"
+    if "gender_clean" in temp.columns:
+        agg_fields["gender_clean"] = "first"
+    if "aap" in temp.columns:
+        agg_fields["aap"] = "max"
+
+    freq = temp.groupby(group_cols, as_index=False).agg(agg_fields)
+    freq.columns = [
+        "_".join([str(part) for part in col if str(part)]) if isinstance(col, tuple) else str(col)
+        for col in freq.columns
+    ]
+
+    rename_cols = {
+        "centre": "Centre",
+        "member": "Senior Name",
+        "activity_count": "Attendances",
+        "activity_nunique": "Unique Activities",
+        "date_max": "Latest Attendance Date",
+        "gender_clean_first": "Gender",
+        "aap_max": "AAP Participated This Year",
+    }
+    freq = freq.rename(columns=rename_cols)
+
+    if "Latest Attendance Date" in freq.columns:
+        freq["Latest Attendance Date"] = pd.to_datetime(freq["Latest Attendance Date"], errors="coerce").dt.date
+    if "AAP Participated This Year" in freq.columns:
+        freq["AAP Participated This Year"] = pd.to_numeric(freq["AAP Participated This Year"], errors="coerce")
+
+    preferred_cols = [
+        "Centre",
+        "Senior Name",
+        "Attendances",
+        "Unique Activities",
+        "Latest Attendance Date",
+        "Gender",
+        "AAP Participated This Year",
+    ]
+    preferred_cols = [c for c in preferred_cols if c in freq.columns]
+    return freq[preferred_cols].sort_values(["Attendances", "Senior Name"], ascending=[False, True]).reset_index(drop=True)
+
+st.markdown("## Senior Attendance Frequency")
+st.caption("These tables count every cleaned `Attended` row across the attendance sheets for the selected centre/view.")
+
+ib_senior_freq = make_senior_attendance_frequency(df_att, "IB")
+ob_senior_freq = make_senior_attendance_frequency(df_att, "OB")
+
+ib_tab, ob_tab = st.tabs([f"IB Seniors ({len(ib_senior_freq):,})", f"OB Seniors ({len(ob_senior_freq):,})"])
+with ib_tab:
+    sortable_table(
+        ib_senior_freq,
+        "IB Seniors by Attendance Frequency",
+        "ib_seniors_attendance_frequency",
+        default_sort="Attendances",
+        default_ascending=False,
+        help_text="IB means `Is Client = Yes`. Attendances are counted from all cleaned attended records, not from the Summary total row.",
+    )
+with ob_tab:
+    sortable_table(
+        ob_senior_freq,
+        "OB Seniors by Attendance Frequency",
+        "ob_seniors_attendance_frequency",
+        default_sort="Attendances",
+        default_ascending=False,
+        help_text="OB means `Is Client = No`. Attendances are counted from all cleaned attended records, not from the Summary total row.",
+    )
+
 # Summary Sheet KPI Table removed.
 # The Summary sheet is still used as the source of truth for KPI Overview cards,
 # but the full Summary table is not displayed to keep the dashboard clean.
