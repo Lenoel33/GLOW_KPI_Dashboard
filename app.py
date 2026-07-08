@@ -1512,12 +1512,13 @@ def make_profile_summary(source_df: pd.DataFrame) -> pd.DataFrame:
         Avg_Attendances=("Attendances", "mean"),
         Avg_Unique_Programmes=("Unique_Programmes", "mean"),
     ).reset_index()
+    # Keep engagement groups in a natural low-to-high order for every table/chart.
     order = {
-        "Super Active (≥20)": 1,
-        "Active (10–19)": 2,
+        "Low / Inactive (≤2)": 1,
+        "Occasional (3–4)": 2,
         "Regular (5–9)": 3,
-        "Occasional (3–4)": 4,
-        "Low / Inactive (≤2)": 5,
+        "Active (10–19)": 4,
+        "Super Active (≥20)": 5,
     }
     profile["_order"] = profile["Engagement Level"].map(order).fillna(99)
     return profile.sort_values(["_order", "Seniors"], ascending=[True, False]).drop(columns=["_order"]).reset_index(drop=True)
@@ -1603,18 +1604,112 @@ profile_tab, type_tab, pref_tab = st.tabs([
 ])
 
 with profile_tab:
-    profile_summary = nice_columns(make_profile_summary(df_att))
-    sortable_table(
-        profile_summary,
-        "Senior Attendance Groups by IB/OB and Gender",
-        "senior_attendance_groups",
-        default_sort="Seniors",
-        default_ascending=False,
-        help_text="Engagement levels are calculated only from total attended rows: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
+    profile_summary_raw = make_profile_summary(df_att)
+    engagement_order = [
+        "Low / Inactive (≤2)",
+        "Occasional (3–4)",
+        "Regular (5–9)",
+        "Active (10–19)",
+        "Super Active (≥20)",
+    ]
+
+    st.markdown("### Senior Attendance Groups")
+    st.caption(
+        "Engagement levels are calculated only from total attended rows: "
+        "Low/Inactive ≤2, Occasional 3–4, Regular 5–9, Active 10–19, Super Active ≥20."
     )
-    if not profile_summary.empty and "Engagement Level" in profile_summary.columns:
-        chart_df = profile_summary.groupby("Engagement Level", as_index=False)["Seniors"].sum()
-        bar_chart(chart_df, "Engagement Level", "Seniors", "Number of Seniors by Attendance Group", key="attendance_group_chart")
+
+    if not profile_summary_raw.empty and "Engagement Level" in profile_summary_raw.columns:
+        chart_df = profile_summary_raw.groupby("Engagement Level", as_index=False)["Seniors"].sum()
+        chart_df["Engagement Level"] = pd.Categorical(chart_df["Engagement Level"], categories=engagement_order, ordered=True)
+        chart_df = chart_df.sort_values("Engagement Level")
+        fig = px.bar(
+            chart_df,
+            x="Engagement Level",
+            y="Seniors",
+            title="Number of Seniors by Attendance Group",
+            text="Seniors",
+            category_orders={"Engagement Level": engagement_order},
+        )
+        fig.update_layout(
+            title_font_size=20,
+            title_font_color="#0D2B45",
+            xaxis_title=None,
+            yaxis_title=None,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=60, b=120),
+            xaxis_tickangle=-35,
+            showlegend=False,
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig, use_container_width=True, key="attendance_group_chart_ordered")
+
+        ib_ob_df = profile_summary_raw.groupby(["Engagement Level", "IB_OB"], as_index=False)["Seniors"].sum()
+        ib_ob_df["Engagement Level"] = pd.Categorical(ib_ob_df["Engagement Level"], categories=engagement_order, ordered=True)
+        ib_ob_df = ib_ob_df.sort_values("Engagement Level")
+        fig2 = px.bar(
+            ib_ob_df,
+            x="Engagement Level",
+            y="Seniors",
+            color="IB_OB",
+            barmode="group",
+            title="Senior Attendance Groups by IB/OB",
+            text="Seniors",
+            category_orders={"Engagement Level": engagement_order, "IB_OB": ["IB", "OB", "Unknown"]},
+        )
+        fig2.update_layout(
+            title_font_size=20,
+            title_font_color="#0D2B45",
+            xaxis_title=None,
+            yaxis_title=None,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=60, b=120),
+            xaxis_tickangle=-35,
+            legend_title_text="IB / OB",
+        )
+        fig2.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig2, use_container_width=True, key="attendance_group_ib_ob_chart")
+
+        gender_df = profile_summary_raw.groupby(["Engagement Level", "Gender"], as_index=False)["Seniors"].sum()
+        gender_df["Engagement Level"] = pd.Categorical(gender_df["Engagement Level"], categories=engagement_order, ordered=True)
+        gender_df = gender_df.sort_values("Engagement Level")
+        fig3 = px.bar(
+            gender_df,
+            x="Engagement Level",
+            y="Seniors",
+            color="Gender",
+            barmode="group",
+            title="Senior Attendance Groups by Gender",
+            text="Seniors",
+            category_orders={"Engagement Level": engagement_order, "Gender": ["Male", "Female", "Unknown"]},
+        )
+        fig3.update_layout(
+            title_font_size=20,
+            title_font_color="#0D2B45",
+            xaxis_title=None,
+            yaxis_title=None,
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            margin=dict(l=20, r=20, t=60, b=120),
+            xaxis_tickangle=-35,
+            legend_title_text="Gender",
+        )
+        fig3.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig3, use_container_width=True, key="attendance_group_gender_chart")
+
+        with st.expander("Show detailed attendance group table"):
+            sortable_table(
+                nice_columns(profile_summary_raw),
+                "Senior Attendance Groups by IB/OB and Gender",
+                "senior_attendance_groups",
+                default_sort="Seniors",
+                default_ascending=False,
+                help_text="Detailed numbers behind the charts. Tables are hidden by default to reduce clutter.",
+            )
+    else:
+        st.info("No senior attendance group data available.")
 
 with type_tab:
     programme_type_overview = make_programme_type_overview(df_att)
