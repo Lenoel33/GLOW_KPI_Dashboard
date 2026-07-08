@@ -62,6 +62,10 @@ def _clean_sheet_table(raw_df, sheet_name):
     data = data[keep].copy()
     data["__sheet__"] = sheet_name
     data["__sheet_date__"] = _extract_date_from_sheet_name(sheet_name)
+    # Explicit flag used by the dashboard to ensure senior frequency tables
+    # are calculated only from real attendance-register sheets, never from
+    # Summary / Unique Seniors / lookup sheets.
+    data["__attendance_register__"] = True
     return data
 
 

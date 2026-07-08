@@ -349,12 +349,18 @@ def clean_gender(value):
 
 
 def clean_ib_ob(value):
+    """Normalise client type without treating blanks/invalid values as OB.
+
+    Important: OB must mean an explicit `No` / `OB` value.  Do not classify
+    every non-IB value as OB, because blank/unknown values would inflate the
+    OB count and make the attendance tables disagree with the Summary page.
+    """
     if pd.isna(value):
         return "Unknown"
     text = str(value).strip().lower()
-    if text in {"ib", "inbound", "i", "incoming", "yes", "y", "true", "1"}:
+    if text in {"ib", "inbound", "i", "incoming", "yes", "y"}:
         return "IB"
-    if text in {"ob", "outbound", "o", "outgoing", "no", "n", "false", "0"}:
+    if text in {"ob", "outbound", "o", "outgoing", "no", "n"}:
         return "OB"
     return "Unknown"
 
@@ -967,6 +973,19 @@ if manual_recurring:
     df["programme_type"] = df["activity"].apply(lambda x: "Recurring" if x in manual_recurring else df.loc[df["activity"] == x, "programme_type"].iloc[0])
 
 df_att = df[df["attended"] == True].copy()
+
+# Individual senior attendance frequency must be calculated only from real
+# attendance-register tabs. Never use Summary, Unique Seniors, lookup, or
+# calculation sheets for per-senior attendance counts, as those sheets are
+# already aggregated and will create false readings.
+if "__attendance_register__" in df_att.columns:
+    df_att = df_att[df_att["__attendance_register__"].fillna(False).astype(bool)].copy()
+if "__sheet__" in df_att.columns:
+    bad_sheet_mask = df_att["__sheet__"].astype(str).str.lower().str.contains(
+        r"summary|unique|template|lookup|pivot|frequency", regex=True, na=False
+    )
+    df_att = df_att[~bad_sheet_mask].copy()
+
 if "gender" in df_att.columns:
     df_att["gender_clean"] = df_att["gender"].apply(clean_gender)
 else:
@@ -1257,21 +1276,32 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
     return freq[preferred_cols].sort_values(["Attendances", "Senior Name"], ascending=[False, True]).reset_index(drop=True)
 
 st.markdown("## Senior Attendance Frequency")
-st.caption("These tables count every cleaned `Attended` row across the attendance sheets for the selected centre/view.")
+st.caption("These tables count only cleaned `Attended` rows from real attendance-register sheets. Summary and Unique Seniors sheets are excluded from individual senior frequency counts.")
 
 ib_senior_freq = make_senior_attendance_frequency(df_att, "IB", selected_centre)
 ob_senior_freq = make_senior_attendance_frequency(df_att, "OB", selected_centre)
 
-# When KPI Overview comes from Summary, the frequency tables may differ because
-# they are built from member-level attendance rows. Only warn when there is no
-# Summary source and both sections should be using the exact same rows.
-if (not use_summary_kpis) and (len(ib_senior_freq) != ib_count or len(ob_senior_freq) != ob_count):
+# Reconciliation rule:
+# - KPI cards follow the workbook Summary page when it is available.
+# - Frequency tables are member-level audits from raw attendance rows.
+# To avoid showing two different headline totals, the tab labels use the same
+# IB/OB counts as the KPI cards.  If the raw attendance rows disagree, show a
+# clear warning instead of silently displaying inconsistent numbers.
+ib_tab_count = ib_count if use_summary_kpis else len(ib_senior_freq)
+ob_tab_count = ob_count if use_summary_kpis else len(ob_senior_freq)
+
+if len(ib_senior_freq) != ib_count or len(ob_senior_freq) != ob_count:
+    mismatch_bits = []
+    if len(ib_senior_freq) != ib_count:
+        mismatch_bits.append(f"IB: Summary/KPI {ib_count:,} vs attendance rows {len(ib_senior_freq):,}")
+    if len(ob_senior_freq) != ob_count:
+        mismatch_bits.append(f"OB: Summary/KPI {ob_count:,} vs attendance rows {len(ob_senior_freq):,}")
     st.warning(
-        "Internal check: KPI IB/OB counts do not match the attendance-frequency tables. "
-        "Please use Clear uploaded data and re-upload the workbook. If this persists, check for duplicated names with different spellings."
+        "IB/OB consistency check: " + "; ".join(mismatch_bits) +
+        ". The KPI cards and tab labels use the Summary page. The tables below show the raw attendance-row audit so you can identify workbook data that needs updating."
     )
 
-ib_tab, ob_tab = st.tabs([f"IB Seniors ({len(ib_senior_freq):,})", f"OB Seniors ({len(ob_senior_freq):,})"])
+ib_tab, ob_tab = st.tabs([f"IB Seniors ({ib_tab_count:,})", f"OB Seniors ({ob_tab_count:,})"])
 with ib_tab:
     sortable_table(
         ib_senior_freq,
@@ -1279,7 +1309,7 @@ with ib_tab:
         "ib_seniors_attendance_frequency",
         default_sort="Attendances",
         default_ascending=False,
-        help_text="IB means `Is Client = Yes`. The table uses cleaned member-level attendance rows; KPI cards above use the Summary page totals.",
+        help_text="IB means an explicit `Is Client = Yes` / `IB` value. Tab count follows the Summary/KPI count; rows show the raw attendance audit.",
     )
 with ob_tab:
     sortable_table(
@@ -1288,7 +1318,7 @@ with ob_tab:
         "ob_seniors_attendance_frequency",
         default_sort="Attendances",
         default_ascending=False,
-        help_text="OB means `Is Client = No`. The table uses cleaned member-level attendance rows; KPI cards above use the Summary page totals.",
+        help_text="OB means an explicit `Is Client = No` / `OB` value only. Blank or invalid client values are not counted as OB.",
     )
 
 # Summary Sheet KPI Table removed.
