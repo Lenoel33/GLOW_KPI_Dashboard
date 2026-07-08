@@ -930,6 +930,25 @@ if missing:
 
 rename_map = {source: target for target, source in final_map.items() if source}
 df = original.rename(columns=rename_map)
+
+# Uploaded GLOW (BB) workbooks can contain an internal Centre column with
+# old labels such as "Tzu Chi SEEN @ Bukit Batok". The dashboard centre should
+# reflect the centre selected during upload, so overwrite the display centre
+# with the protected uploaded-centre helper column where available.
+if df.columns.duplicated().any():
+    collapsed = {}
+    for col in dict.fromkeys(list(df.columns)):
+        subset = df.loc[:, df.columns == col]
+        if subset.shape[1] == 1:
+            collapsed[col] = subset.iloc[:, 0]
+        else:
+            collapsed[col] = subset.replace(r"^\s*$", pd.NA, regex=True).bfill(axis=1).iloc[:, 0]
+    df = pd.DataFrame(collapsed)
+if "__uploaded_centre__" in df.columns:
+    df["centre"] = df["__uploaded_centre__"].astype(str).str.strip()
+elif selected_centre != "All Centres":
+    df["centre"] = selected_centre
+
 df = df.dropna(subset=["activity", "member"])
 df["activity"] = df["activity"].astype(str).str.strip()
 df["member"] = df["member"].astype(str).str.strip()
@@ -1027,7 +1046,39 @@ new_ob = int(summary_kpis.get("new_ob", 0)) if isinstance(summary_kpis, dict) el
 ib_pct = ib_count / total_unique_seniors if total_unique_seniors else 0
 ob_pct = ob_count / total_unique_seniors if total_unique_seniors else 0
 inactive_pct = inactive_count / total_unique_seniors if total_unique_seniors else 0
-use_summary_kpis = False
+
+# Headline KPI cards must follow the workbook Summary page.
+# Detail tables below still use cleaned attendance rows because the Summary page
+# contains totals only, not member-level attendance frequency.
+use_summary_kpis = isinstance(summary_kpis, dict) and bool(summary_kpis)
+if use_summary_kpis:
+    cleaned_snapshot = {
+        "programmes": total_activities,
+        "attendances": total_attendances,
+        "unique_members": total_unique_seniors,
+        "ib_count": ib_count,
+        "ob_count": ob_count,
+        "male_count": male_unique_members,
+        "inactive_count": inactive_count,
+    }
+    total_activities = int(summary_kpis.get("programmes", total_activities) or 0)
+    total_attendances = int(summary_kpis.get("attendances", total_attendances) or 0)
+    total_unique_seniors = int(summary_kpis.get("unique_members", total_unique_seniors) or 0)
+    avg_attendance_per_activity = float(summary_kpis.get("avg_attendance_per_programme", 0) or 0)
+    ib_count = int(summary_kpis.get("ib_count", ib_count) or 0)
+    ob_count = int(summary_kpis.get("ob_count", ob_count) or 0)
+    male_unique_members = int(summary_kpis.get("male_count", male_unique_members) or 0)
+    inactive_count = int(summary_kpis.get("inactive_count", inactive_count) or 0)
+    new_ib = int(summary_kpis.get("new_ib", new_ib) or 0)
+    new_ob = int(summary_kpis.get("new_ob", new_ob) or 0)
+    ib_pct = float(summary_kpis.get("ib_pct", ib_count / total_unique_seniors if total_unique_seniors else 0) or 0)
+    ob_pct = float(summary_kpis.get("ob_pct", ob_count / total_unique_seniors if total_unique_seniors else 0) or 0)
+    male_unique_pct = float(summary_kpis.get("male_pct", male_unique_members / total_unique_seniors if total_unique_seniors else 0) or 0)
+    inactive_pct = float(summary_kpis.get("inactive_pct", inactive_count / total_unique_seniors if total_unique_seniors else 0) or 0)
+    # The Summary sheet stores male as unique male seniors, so display the same
+    # number in the Male card to avoid mixing attendance count with member count.
+    male_attendances = male_unique_members
+    male_attendance_pct = male_unique_pct
 
 kpis = {
     "total_attendances": total_attendances,
@@ -1046,11 +1097,27 @@ kpis = {
     "inactive_pct": inactive_pct,
     "new_ib": new_ib,
     "new_ob": new_ob,
-    "kpi_source": "Cleaned attendance rows",
+    "kpi_source": "Summary sheet" if use_summary_kpis else "Cleaned attendance rows",
 }
 
 st.markdown("## KPI Overview")
-st.caption("KPI Overview uses the same cleaned Attended rows as the senior-frequency and inactive-senior tables, so IB/OB counts stay consistent across the dashboard.")
+if use_summary_kpis:
+    st.caption("KPI Overview is taken directly from the workbook Summary page / OVERALL TOTAL row. Member-frequency tables below use cleaned attendance rows because the Summary page has no per-senior frequency breakdown.")
+    # Let staff see when the raw attendance-register rows do not exactly match
+    # the approved Summary totals without replacing the Summary source of truth.
+    raw_mismatches = []
+    if cleaned_snapshot.get("attendances") != total_attendances:
+        raw_mismatches.append(f"Attendances: Summary {total_attendances:,} vs cleaned rows {cleaned_snapshot.get('attendances', 0):,}")
+    if cleaned_snapshot.get("unique_members") != total_unique_seniors:
+        raw_mismatches.append(f"Unique Members: Summary {total_unique_seniors:,} vs cleaned rows {cleaned_snapshot.get('unique_members', 0):,}")
+    if cleaned_snapshot.get("ib_count") != ib_count:
+        raw_mismatches.append(f"IB: Summary {ib_count:,} vs cleaned rows {cleaned_snapshot.get('ib_count', 0):,}")
+    if cleaned_snapshot.get("ob_count") != ob_count:
+        raw_mismatches.append(f"OB: Summary {ob_count:,} vs cleaned rows {cleaned_snapshot.get('ob_count', 0):,}")
+    if raw_mismatches:
+        st.info("Summary source is being used for KPI Overview. Raw attendance-register check: " + "; ".join(raw_mismatches) + ".")
+else:
+    st.caption("No Summary page totals were found, so KPI Overview is calculated from cleaned attended rows.")
 
 render_kpi_cards([
     ("Programmes", f"{total_activities:,}"),
@@ -1116,19 +1183,13 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
     temp = _collapse_duplicate_columns(temp).copy()
 
     if "__uploaded_centre__" in temp.columns:
-        uploaded_centre = temp["__uploaded_centre__"].astype(str).str.strip()
-        if "centre" not in temp.columns:
-            temp["centre"] = uploaded_centre
-        else:
-            centre_text = temp["centre"].astype(str).str.strip()
-            temp["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), uploaded_centre)
+        # Always use the centre chosen at upload time. Do not display older/raw
+        # Centre values from the workbook such as "Tzu Chi SEEN @ Bukit Batok"
+        # when this upload is being treated as GLOW Bukit Batok.
+        temp["centre"] = temp["__uploaded_centre__"].astype(str).str.strip()
 
     if fallback_centre and fallback_centre != "All Centres":
-        if "centre" not in temp.columns:
-            temp["centre"] = fallback_centre
-        else:
-            centre_text = temp["centre"].astype(str).str.strip()
-            temp["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), fallback_centre)
+        temp["centre"] = fallback_centre
 
     required_cols = {"member", "ib_ob_clean"}
     if not required_cols.issubset(set(temp.columns)):
@@ -1201,8 +1262,10 @@ st.caption("These tables count every cleaned `Attended` row across the attendanc
 ib_senior_freq = make_senior_attendance_frequency(df_att, "IB", selected_centre)
 ob_senior_freq = make_senior_attendance_frequency(df_att, "OB", selected_centre)
 
-# These should now tally with KPI Overview because both use df_att.
-if len(ib_senior_freq) != ib_count or len(ob_senior_freq) != ob_count:
+# When KPI Overview comes from Summary, the frequency tables may differ because
+# they are built from member-level attendance rows. Only warn when there is no
+# Summary source and both sections should be using the exact same rows.
+if (not use_summary_kpis) and (len(ib_senior_freq) != ib_count or len(ob_senior_freq) != ob_count):
     st.warning(
         "Internal check: KPI IB/OB counts do not match the attendance-frequency tables. "
         "Please use Clear uploaded data and re-upload the workbook. If this persists, check for duplicated names with different spellings."
@@ -1216,7 +1279,7 @@ with ib_tab:
         "ib_seniors_attendance_frequency",
         default_sort="Attendances",
         default_ascending=False,
-        help_text="IB means `Is Client = Yes`. Attendances are counted from all cleaned attended records, not from the Summary total row.",
+        help_text="IB means `Is Client = Yes`. The table uses cleaned member-level attendance rows; KPI cards above use the Summary page totals.",
     )
 with ob_tab:
     sortable_table(
@@ -1225,7 +1288,7 @@ with ob_tab:
         "ob_seniors_attendance_frequency",
         default_sort="Attendances",
         default_ascending=False,
-        help_text="OB means `Is Client = No`. Attendances are counted from all cleaned attended records, not from the Summary total row.",
+        help_text="OB means `Is Client = No`. The table uses cleaned member-level attendance rows; KPI cards above use the Summary page totals.",
     )
 
 # Summary Sheet KPI Table removed.
@@ -1375,12 +1438,9 @@ if "aap" in df.columns:
         inactive_source["gender_clean"] = inactive_source["gender"].apply(clean_gender)
 
     if "__uploaded_centre__" in inactive_source.columns:
-        uploaded_centre = inactive_source["__uploaded_centre__"].astype(str).str.strip()
-        if "centre" not in inactive_source.columns:
-            inactive_source["centre"] = uploaded_centre
-        else:
-            centre_text = inactive_source["centre"].astype(str).str.strip()
-            inactive_source["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), uploaded_centre)
+        inactive_source["centre"] = inactive_source["__uploaded_centre__"].astype(str).str.strip()
+    elif selected_centre != "All Centres":
+        inactive_source["centre"] = selected_centre
 
     # Keep the selected programme-type filter if the user applied one.
     if activity_type_filter != "All" and "programme_type" in inactive_source.columns:
