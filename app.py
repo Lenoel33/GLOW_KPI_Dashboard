@@ -1061,30 +1061,53 @@ if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
 
 # Senior attendance frequency by IB/OB status
 def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str) -> pd.DataFrame:
-    """Count attended rows for each senior by IB/OB status."""
-    if source_df is None or source_df.empty or "member" not in source_df.columns or "ib_ob_clean" not in source_df.columns:
+    """Count attended rows for each senior by IB/OB status.
+
+    This helper is intentionally defensive because uploaded Excel workbooks can
+    produce duplicated column names after cleaning/renaming. Pandas raises
+    `ValueError: Grouper for '<name>' not 1-dimensional` when groupby columns
+    are duplicated, so we first collapse duplicated columns and then build the
+    report from one-dimensional Series only.
+    """
+    if source_df is None or source_df.empty:
         return pd.DataFrame()
 
-    temp = source_df[source_df["ib_ob_clean"] == status_value].copy()
+    temp = source_df.copy()
+
+    # Remove duplicated column labels. Keep the first occurrence because the
+    # dashboard's cleaned columns are created first and are the source of truth.
+    temp = temp.loc[:, ~pd.Index(temp.columns).duplicated(keep="first")].copy()
+
+    required_cols = {"member", "ib_ob_clean"}
+    if not required_cols.issubset(set(temp.columns)):
+        return pd.DataFrame()
+
+    temp["member"] = temp["member"].astype(str).str.strip()
+    temp["ib_ob_clean"] = temp["ib_ob_clean"].astype(str).str.strip().str.upper()
+    status_value = str(status_value).strip().upper()
+
+    temp = temp[(temp["ib_ob_clean"] == status_value) & (temp["member"] != "") & (temp["member"].str.lower() != "nan")].copy()
     if temp.empty:
         return pd.DataFrame()
 
-    group_cols = []
-    if "centre" in temp.columns:
-        group_cols.append("centre")
-    group_cols.append("member")
+    # Ensure activity exists for counting. If not available, count member rows.
+    if "activity" not in temp.columns:
+        temp["activity"] = temp["member"]
 
-    agg_fields = {
-        "activity": ["count", pd.Series.nunique],
-    }
+    group_cols = ["member"]
+    if "centre" in temp.columns:
+        group_cols = ["centre", "member"]
+
+    agg_fields = {"activity": ["count", pd.Series.nunique]}
     if "date" in temp.columns:
         agg_fields["date"] = "max"
     if "gender_clean" in temp.columns:
         agg_fields["gender_clean"] = "first"
     if "aap" in temp.columns:
+        temp["aap"] = pd.to_numeric(temp["aap"], errors="coerce")
         agg_fields["aap"] = "max"
 
-    freq = temp.groupby(group_cols, as_index=False).agg(agg_fields)
+    freq = temp.groupby(group_cols, as_index=False, dropna=False).agg(agg_fields)
     freq.columns = [
         "_".join([str(part) for part in col if str(part)]) if isinstance(col, tuple) else str(col)
         for col in freq.columns
@@ -1116,6 +1139,8 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str)
         "AAP Participated This Year",
     ]
     preferred_cols = [c for c in preferred_cols if c in freq.columns]
+    if not preferred_cols:
+        return pd.DataFrame()
     return freq[preferred_cols].sort_values(["Attendances", "Senior Name"], ascending=[False, True]).reset_index(drop=True)
 
 st.markdown("## Senior Attendance Frequency")
