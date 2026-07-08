@@ -1459,63 +1459,30 @@ else:
 
 
 
-def infer_programme_category(activity_name) -> str:
-    """Simple, editable keyword grouping for programme preference analysis."""
-    text = str(activity_name).strip().lower()
-    if not text or text == "nan":
-        return "Uncategorised"
-    exercise_words = ["fist", "tai", "qi", "qigong", "yoga", "zumba", "walk", "sport", "fitness", "exercise", "dance", "line dance", "harmony"]
-    arts_words = ["art", "craft", "paint", "drawing", "music", "melody", "sing", "karaoke", "h.art", "flower", "calligraphy"]
-    food_words = ["tea", "food", "cook", "dumpling", "bake", "meal", "lunch", "healthy plate", "nutrition"]
-    games_words = ["game", "pokemon", "pokémon", "kahoot", "bingo", "mahjong", "switch", "digital", "quiz"]
-    health_words = ["health", "screen", "medical", "blood", "frailty", "wellness", "talk", "workshop", "prevention"]
-    social_words = ["befriend", "buddy", "social", "outing", "carnival", "celebration", "party", "festival", "neighbour", "neighbor"]
-    if any(w in text for w in exercise_words):
-        return "Exercise / Movement"
-    if any(w in text for w in arts_words):
-        return "Arts / Music / Creative"
-    if any(w in text for w in food_words):
-        return "Food / Heritage"
-    if any(w in text for w in games_words):
-        return "Games / Digital"
-    if any(w in text for w in health_words):
-        return "Health / Learning"
-    if any(w in text for w in social_words):
-        return "Social / Outreach"
-    return "Other Programmes"
-
 
 def make_profile_label(attendances: int) -> str:
+    """Objective engagement bands based only on total attendance counts in the KPI workbook."""
     try:
         n = int(attendances)
     except Exception:
         n = 0
     if n >= 20:
-        return "Super Active"
+        return "Super Active (≥20)"
     if n >= 10:
-        return "Active"
+        return "Active (10–19)"
     if n >= 5:
-        return "Regular"
+        return "Regular (5–9)"
     if n >= 3:
-        return "Occasional"
-    return "Low / Inactive"
-
-
-def make_diversity_label(unique_activities: int) -> str:
-    try:
-        n = int(unique_activities)
-    except Exception:
-        n = 0
-    if n >= 8:
-        return "High Explorer"
-    if n >= 4:
-        return "Moderate Explorer"
-    if n >= 2:
-        return "Low Explorer"
-    return "Specialist"
+        return "Occasional (3–4)"
+    return "Low / Inactive (≤2)"
 
 
 def make_programme_type_overview(source_df: pd.DataFrame) -> pd.DataFrame:
+    """One-time vs recurring is derived only from workbook attendance rows.
+
+    Programme Type is based on whether the programme appears on more than one date/session in
+    the uploaded KPI workbook. No external or inferred preference data is used.
+    """
     if source_df is None or source_df.empty or "programme_type" not in source_df.columns:
         return pd.DataFrame()
     out = source_df.groupby("programme_type").agg(
@@ -1529,57 +1496,64 @@ def make_programme_type_overview(source_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def make_profile_summary(source_df: pd.DataFrame) -> pd.DataFrame:
+    """Senior engagement groups based only on attendance frequency."""
     if source_df is None or source_df.empty:
         return pd.DataFrame()
     senior = source_df.groupby("member").agg(
         Attendances=("activity", "count"),
-        Unique_Activities=("activity", pd.Series.nunique),
+        Unique_Programmes=("activity", pd.Series.nunique),
         IB_OB=("ib_ob_clean", "first"),
         Gender=("gender_clean", "first"),
     ).reset_index()
-    senior["Engagement Profile"] = senior["Attendances"].apply(make_profile_label)
-    senior["Diversity Profile"] = senior["Unique_Activities"].apply(make_diversity_label)
-    profile = senior.groupby(["Engagement Profile", "IB_OB", "Gender"], dropna=False).agg(
+    senior["Engagement Level"] = senior["Attendances"].apply(make_profile_label)
+    profile = senior.groupby(["Engagement Level", "IB_OB", "Gender"], dropna=False).agg(
         Seniors=("member", pd.Series.nunique),
         Total_Attendances=("Attendances", "sum"),
         Avg_Attendances=("Attendances", "mean"),
-        Avg_Unique_Activities=("Unique_Activities", "mean"),
+        Avg_Unique_Programmes=("Unique_Programmes", "mean"),
     ).reset_index()
-    order = {"Super Active": 1, "Active": 2, "Regular": 3, "Occasional": 4, "Low / Inactive": 5}
-    profile["_order"] = profile["Engagement Profile"].map(order).fillna(99)
+    order = {
+        "Super Active (≥20)": 1,
+        "Active (10–19)": 2,
+        "Regular (5–9)": 3,
+        "Occasional (3–4)": 4,
+        "Low / Inactive (≤2)": 5,
+    }
+    profile["_order"] = profile["Engagement Level"].map(order).fillna(99)
     return profile.sort_values(["_order", "Seniors"], ascending=[True, False]).drop(columns=["_order"]).reset_index(drop=True)
 
 
-def make_profile_programme_preferences(source_df: pd.DataFrame, profile_col: str = "gender_clean") -> pd.DataFrame:
+def make_profile_programme_preferences(source_df: pd.DataFrame, profile_col: str) -> pd.DataFrame:
+    """Programme preferences by explicit workbook field: IB/OB or Gender."""
     if source_df is None or source_df.empty or profile_col not in source_df.columns:
         return pd.DataFrame()
-    out = source_df.groupby([profile_col, "activity", "programme_category", "programme_type"], dropna=False).agg(
+    out = source_df.groupby([profile_col, "activity", "programme_type"], dropna=False).agg(
         Attendances=("member", "count"),
         Unique_Seniors=("member", pd.Series.nunique),
     ).reset_index()
     total_by_profile = out.groupby(profile_col)["Attendances"].transform("sum")
-    out["Share Within Profile"] = out["Attendances"] / total_by_profile.replace(0, np.nan)
-    out = out.rename(columns={profile_col: "Profile", "activity": "Programme", "programme_category": "Category", "programme_type": "Programme Type"})
-    return out.sort_values(["Profile", "Attendances"], ascending=[True, False]).reset_index(drop=True)
+    out["Share Within Group"] = out["Attendances"] / total_by_profile.replace(0, np.nan)
+    out = out.rename(columns={profile_col: "Group", "activity": "Programme", "programme_type": "Programme Type"})
+    return out.sort_values(["Group", "Attendances"], ascending=[True, False]).reset_index(drop=True)
 
 
-def make_ib_programme_preferences(source_df: pd.DataFrame) -> pd.DataFrame:
-    ib = source_df[source_df.get("ib_ob_clean", "") == "IB"].copy() if source_df is not None and not source_df.empty else pd.DataFrame()
-    if ib.empty:
+def make_programme_preferences_by_status(source_df: pd.DataFrame, status_value: str) -> pd.DataFrame:
+    temp = source_df[source_df.get("ib_ob_clean", "") == status_value].copy() if source_df is not None and not source_df.empty else pd.DataFrame()
+    if temp.empty:
         return pd.DataFrame()
-    out = ib.groupby(["activity", "programme_category", "programme_type"], dropna=False).agg(
-        IB_Attendances=("member", "count"),
-        Unique_IB_Seniors=("member", pd.Series.nunique),
+    out = temp.groupby(["activity", "programme_type"], dropna=False).agg(
+        Attendances=("member", "count"),
+        Unique_Seniors=("member", pd.Series.nunique),
     ).reset_index()
-    out["Avg Attendance / IB Senior"] = out["IB_Attendances"] / out["Unique_IB_Seniors"].replace(0, np.nan)
-    return out.rename(columns={"activity": "Programme", "programme_category": "Category", "programme_type": "Programme Type"}).sort_values("IB_Attendances", ascending=False).reset_index(drop=True)
+    out["Avg Attendance / Senior"] = out["Attendances"] / out["Unique_Seniors"].replace(0, np.nan)
+    return out.rename(columns={"activity": "Programme", "programme_type": "Programme Type"}).sort_values("Attendances", ascending=False).reset_index(drop=True)
 
 
 def make_favourite_programmes(source_df: pd.DataFrame, status_value: str = "IB") -> pd.DataFrame:
     temp = source_df[source_df.get("ib_ob_clean", "") == status_value].copy() if source_df is not None and not source_df.empty else pd.DataFrame()
     if temp.empty:
         return pd.DataFrame()
-    counts = temp.groupby(["member", "activity", "programme_category", "programme_type"]).size().reset_index(name="Times Attended")
+    counts = temp.groupby(["member", "activity", "programme_type"]).size().reset_index(name="Times Attended")
     counts = counts.sort_values(["member", "Times Attended", "activity"], ascending=[True, False, True])
     favourite = counts.groupby("member", as_index=False).first()
     totals = temp.groupby("member").agg(
@@ -1590,20 +1564,18 @@ def make_favourite_programmes(source_df: pd.DataFrame, status_value: str = "IB")
     ).reset_index()
     out = favourite.merge(totals, on="member", how="left")
     out["Favourite Share"] = out["Times Attended"] / out["Total_Attendances"].replace(0, np.nan)
-    out["Engagement Profile"] = out["Total_Attendances"].apply(make_profile_label)
-    out["Diversity Profile"] = out["Unique_Programmes"].apply(make_diversity_label)
+    out["Engagement Level"] = out["Total_Attendances"].apply(make_profile_label)
     if "Latest_Attendance" in out.columns:
         out["Latest_Attendance"] = pd.to_datetime(out["Latest_Attendance"], errors="coerce").dt.date
     out = out.rename(columns={
         "member": "Senior Name",
         "activity": "Favourite Programme",
-        "programme_category": "Favourite Category",
         "programme_type": "Favourite Programme Type",
         "Total_Attendances": "Total Attendances",
         "Unique_Programmes": "Unique Programmes",
         "Latest_Attendance": "Latest Attendance",
     })
-    preferred = ["Senior Name", "Gender", "Total Attendances", "Unique Programmes", "Favourite Programme", "Times Attended", "Favourite Share", "Favourite Category", "Favourite Programme Type", "Engagement Profile", "Diversity Profile", "Latest Attendance"]
+    preferred = ["Senior Name", "Gender", "Total Attendances", "Unique Programmes", "Favourite Programme", "Times Attended", "Favourite Share", "Favourite Programme Type", "Engagement Level", "Latest Attendance"]
     return out[[c for c in preferred if c in out.columns]].sort_values(["Total Attendances", "Senior Name"], ascending=[False, True]).reset_index(drop=True)
 
 
@@ -1613,143 +1585,91 @@ def make_senior_programme_breakdown(source_df: pd.DataFrame, senior_name: str) -
     temp = source_df[source_df["member"].astype(str).str.strip() == str(senior_name).strip()].copy()
     if temp.empty:
         return pd.DataFrame()
-    out = temp.groupby(["activity", "programme_category", "programme_type"], dropna=False).agg(
+    out = temp.groupby(["activity", "programme_type"], dropna=False).agg(
         Attendances=("member", "count"),
         Sessions=("date", pd.Series.nunique) if "date" in temp.columns else ("member", "count"),
     ).reset_index()
     out["Share"] = out["Attendances"] / out["Attendances"].sum()
-    return out.rename(columns={"activity": "Programme", "programme_category": "Category", "programme_type": "Programme Type"}).sort_values("Attendances", ascending=False).reset_index(drop=True)
+    return out.rename(columns={"activity": "Programme", "programme_type": "Programme Type"}).sort_values("Attendances", ascending=False).reset_index(drop=True)
 
 
-def make_ib_gender_preferences(source_df: pd.DataFrame) -> pd.DataFrame:
-    ib = source_df[source_df.get("ib_ob_clean", "") == "IB"].copy() if source_df is not None and not source_df.empty else pd.DataFrame()
-    if ib.empty or "gender_clean" not in ib.columns:
-        return pd.DataFrame()
-    return make_profile_programme_preferences(ib, "gender_clean")
-
-
-
-# Preference and profile analytics built from the same cleaned attendance rows.
-df_att["programme_category"] = df_att["activity"].apply(infer_programme_category)
-
-st.markdown("## Programme & Senior Profile Analytics")
-st.caption("These insights use only cleaned real attendance-register rows. Summary and Unique Seniors pages are not used for individual preferences.")
+st.markdown("## Programme & Senior Attendance Analytics")
+st.caption("Only data directly available from the KPI workbook is shown. Inferred categories, living-alone analysis, AI recommendations, and other unsupported fields have been removed.")
 
 profile_tab, type_tab, pref_tab = st.tabs([
-    "Senior Profiles",
+    "Senior Attendance Groups",
     "One-Time vs Recurring",
-    "Programme Preferences by Profile",
+    "Programme Preferences",
 ])
 
 with profile_tab:
     profile_summary = nice_columns(make_profile_summary(df_att))
-    st.caption("Engagement profiles are separated by IB/OB first, then you can sort inside each table.")
-    if "IB OB" in profile_summary.columns:
-        render_grouped_tables(
-            profile_summary,
-            "IB OB",
-            "Senior Engagement Profiles",
-            "senior_profile_summary",
-            default_sort="Seniors",
-            default_ascending=False,
-            help_text="Profiles are based on total attendance frequency: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
-        )
-    else:
-        sortable_table(
-            profile_summary,
-            "Senior Engagement Profiles by IB/OB and Gender",
-            "senior_profile_summary",
-            default_sort="Seniors",
-            default_ascending=False,
-            help_text="Profiles are based on total attendance frequency: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
-        )
-    if not profile_summary.empty and "Engagement Profile" in profile_summary.columns:
-        chart_df = profile_summary.groupby("Engagement Profile", as_index=False)["Seniors"].sum()
-        bar_chart(chart_df, "Engagement Profile", "Seniors", "Number of Seniors by Engagement Profile", key="engagement_profile_chart")
-    st.info("Living-alone analysis is not shown because the current KPI workbook does not contain a living arrangement field. Add a 'Living Arrangement' column later to unlock this view.")
+    sortable_table(
+        profile_summary,
+        "Senior Attendance Groups by IB/OB and Gender",
+        "senior_attendance_groups",
+        default_sort="Seniors",
+        default_ascending=False,
+        help_text="Engagement levels are calculated only from total attended rows: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
+    )
+    if not profile_summary.empty and "Engagement Level" in profile_summary.columns:
+        chart_df = profile_summary.groupby("Engagement Level", as_index=False)["Seniors"].sum()
+        bar_chart(chart_df, "Engagement Level", "Seniors", "Number of Seniors by Attendance Group", key="attendance_group_chart")
 
 with type_tab:
     programme_type_overview = make_programme_type_overview(df_att)
     sortable_table(
         programme_type_overview,
-        "Total One-Time vs Recurring Activities",
+        "One-Time vs Recurring Programme Overview",
         "programme_type_overview",
         default_sort="Attendances",
         default_ascending=False,
-        help_text="Shows the total number of programmes, attendances, and unique seniors for one-time vs recurring activities.",
+        help_text="Programme type is derived only from attendance dates in the workbook. A programme appearing on more than one date/session is treated as recurring.",
     )
     if not programme_type_overview.empty:
-        c1, c2 = st.columns(2)
-        with c1:
+        col_a, col_b = st.columns(2)
+        with col_a:
             bar_chart(programme_type_overview, "Programme Type", "Programmes", "Number of Programmes by Type", key="programme_type_programmes_chart")
-        with c2:
+        with col_b:
             bar_chart(programme_type_overview, "Programme Type", "Attendances", "Attendances by Programme Type", key="programme_type_attendances_chart")
 
 with pref_tab:
     st.markdown("### Programme Preferences by Clearly Separated Groups")
-    st.caption("IB/OB, Gender, and Programme Category are shown in separate tabs so the groups are never visually mixed.")
+    st.caption("IB/OB and Gender are shown in separate tabs so groups are not visually mixed.")
+    status_pref_tab, gender_pref_tab = st.tabs(["IB / OB", "Gender"])
 
-    by_ibob_tab, by_gender_tab, by_category_tab = st.tabs([
-        "IB / OB",
-        "Gender",
-        "Programme Category",
-    ])
-
-    with by_ibob_tab:
-        pref_df = make_profile_programme_preferences(df_att, "ib_ob_clean")
-        pref_df = nice_columns(pref_df)
-        if "Profile" in pref_df.columns:
+    with status_pref_tab:
+        pref_df = nice_columns(make_profile_programme_preferences(df_att, "ib_ob_clean"))
+        if "Group" in pref_df.columns:
             render_grouped_tables(
                 pref_df,
-                "Profile",
+                "Group",
                 "Programme Preferences by IB/OB",
                 "programme_preferences_ib_ob",
                 default_sort="Attendances",
                 default_ascending=False,
-                help_text="Each tab shows programme preferences for that profile only.",
+                help_text="IB and OB programme preferences are separated into clear tabs.",
             )
         else:
             st.info("No IB/OB preference data available.")
 
-    with by_gender_tab:
-        gender_pref_df = make_profile_programme_preferences(df_att, "gender_clean")
-        gender_pref_df = nice_columns(gender_pref_df)
-        if "Profile" in gender_pref_df.columns:
+    with gender_pref_tab:
+        gender_pref_df = nice_columns(make_profile_programme_preferences(df_att, "gender_clean"))
+        if "Group" in gender_pref_df.columns:
             render_grouped_tables(
                 gender_pref_df,
-                "Profile",
+                "Group",
                 "Programme Preferences by Gender",
                 "programme_preferences_gender",
                 default_sort="Attendances",
                 default_ascending=False,
-                help_text="Each tab shows programme preferences for one gender group only.",
+                help_text="Gender preferences are separated into clear tabs.",
             )
         else:
             st.info("No gender preference data available.")
 
-    with by_category_tab:
-        category_pref_df = df_att.groupby(["programme_category", "activity", "programme_type"], dropna=False).agg(
-            Attendances=("member", "count"),
-            Unique_Seniors=("member", pd.Series.nunique),
-        ).reset_index().rename(columns={"programme_category": "Profile", "activity": "Programme", "programme_type": "Programme Type"})
-        category_pref_df["Share Within Profile"] = category_pref_df["Attendances"] / category_pref_df.groupby("Profile")["Attendances"].transform("sum").replace(0, np.nan)
-        category_pref_df = category_pref_df.sort_values(["Profile", "Attendances"], ascending=[True, False]).reset_index(drop=True)
-        category_pref_df = nice_columns(category_pref_df)
-        if "Profile" in category_pref_df.columns:
-            render_grouped_tables(
-                category_pref_df,
-                "Profile",
-                "Programme Preferences by Category",
-                "programme_preferences_category",
-                default_sort="Attendances",
-                default_ascending=False,
-                help_text="Each tab shows programmes within one category only.",
-            )
-        else:
-            st.info("No category preference data available.")
-
 st.markdown("## IB Preferences")
-st.caption("This section focuses only on IB seniors and shows which programmes they prefer, their favourite activity, and individual programme patterns.")
+st.caption("This section focuses only on IB seniors using real attendance rows from the KPI workbook.")
 
 ib_pref_tab, ib_fav_tab, ib_gender_tab, ib_profile_tab = st.tabs([
     "Popular IB Programmes",
@@ -1759,19 +1679,17 @@ ib_pref_tab, ib_fav_tab, ib_gender_tab, ib_profile_tab = st.tabs([
 ])
 
 with ib_pref_tab:
-    ib_prefs = make_ib_programme_preferences(df_att)
+    ib_prefs = make_programme_preferences_by_status(df_att, "IB")
     sortable_table(
         ib_prefs,
         "Most Popular Programmes Among IB Seniors",
         "ib_programme_preferences",
-        default_sort="IB_Attendances",
+        default_sort="Attendances",
         default_ascending=False,
-        help_text="IB Attendances counts every attended IB row. Unique IB Seniors counts distinct IB seniors per programme.",
+        help_text="Attendances counts every attended IB row. Unique Seniors counts distinct IB seniors per programme.",
     )
     if not ib_prefs.empty:
-        bar_chart(ib_prefs.head(20), "Programme", "IB_Attendances", "Top IB Programmes by Attendance", color="Programme Type", key="ib_preference_chart")
-        cat_summary = ib_prefs.groupby("Category", as_index=False).agg(IB_Attendances=("IB_Attendances", "sum"), Unique_IB_Seniors=("Unique_IB_Seniors", "sum"))
-        bar_chart(cat_summary.sort_values("IB_Attendances", ascending=False), "Category", "IB_Attendances", "IB Preferences by Programme Category", key="ib_category_chart")
+        bar_chart(ib_prefs.head(20), "Programme", "Attendances", "Top IB Programmes by Attendance", color="Programme Type", key="ib_preference_chart")
 
 with ib_fav_tab:
     ib_favourites = make_favourite_programmes(df_att, "IB")
@@ -1785,16 +1703,17 @@ with ib_fav_tab:
     )
 
 with ib_gender_tab:
-    ib_gender_prefs = nice_columns(make_ib_gender_preferences(df_att))
-    if "Profile" in ib_gender_prefs.columns:
+    ib_only = df_att[df_att.get("ib_ob_clean", "") == "IB"].copy()
+    ib_gender_prefs = nice_columns(make_profile_programme_preferences(ib_only, "gender_clean"))
+    if "Group" in ib_gender_prefs.columns:
         render_grouped_tables(
             ib_gender_prefs,
-            "Profile",
+            "Group",
             "IB Programme Preferences by Gender",
             "ib_gender_preferences",
             default_sort="Attendances",
             default_ascending=False,
-            help_text="Male and female IB preferences are separated into clear tabs instead of being mixed in one table.",
+            help_text="Male and female IB preferences are separated into clear tabs.",
         )
     else:
         st.info("No IB gender preference data available.")
@@ -1806,7 +1725,7 @@ def render_ib_profile_card_section(att_df: pd.DataFrame):
         st.info("No IB seniors found in the cleaned attendance rows.")
         return
 
-    st.caption("Use the selector below to update only this profile-card section where supported by Streamlit. The selected senior is saved in session state.")
+    st.caption("Use the selector below to view one IB senior. The selected senior is saved in session state.")
     selected_ib_senior = st.selectbox(
         "Select an IB senior",
         ib_names,
@@ -1824,8 +1743,7 @@ def render_ib_profile_card_section(att_df: pd.DataFrame):
         ("Total Attendances", f"{total_att:,}"),
         ("Unique Programmes", f"{unique_prog:,}"),
         ("Favourite Programme", fav),
-        ("Engagement Profile", make_profile_label(total_att)),
-        ("Diversity Profile", make_diversity_label(unique_prog)),
+        ("Engagement Level", make_profile_label(total_att)),
         ("Latest Attendance", str(latest)),
         ("IB/OB", "IB"),
     ])
@@ -1848,6 +1766,7 @@ summary_cols = [
     "avg_attendance_per_session", "returning_members", "retention_score", "male_attendances",
     "unique_male_attendances", "male_pct", "unique_male_pct", "sample_note"
 ]
+summary_cols = [c for c in summary_cols if c in activity_stats.columns]
 activity_summary_sorted = sortable_table(
     nice_columns(activity_stats[summary_cols]),
     "Activity Summary",
@@ -1860,7 +1779,9 @@ bar_chart(activity_summary_sorted.head(20), "Activity", "Total Attendances", "To
 
 one_time = activity_stats[activity_stats["programme_type"] == "One-Time"].copy()
 if not one_time.empty:
-    one_time_display = nice_columns(one_time[["activity", "total_attendances", "unique_seniors", "male_attendances", "unique_male_attendances", "male_pct", "ib_participants", "ob_participants", "attendance_rate"]])
+    cols = ["activity", "total_attendances", "unique_seniors", "male_attendances", "unique_male_attendances", "male_pct", "ib_participants", "ob_participants", "attendance_rate"]
+    cols = [c for c in cols if c in one_time.columns]
+    one_time_display = nice_columns(one_time[cols])
     one_time_sorted = sortable_table(one_time_display, "One-Time Programmes", "one_time", default_sort="Total Attendances", default_ascending=False)
     bar_chart(one_time_sorted.head(20), "Activity", "Total Attendances", "One-Time Programmes by Attendance", key="one_time_chart")
 else:
@@ -1868,14 +1789,18 @@ else:
 
 recurring = activity_stats[activity_stats["programme_type"] == "Recurring"].copy()
 if not recurring.empty:
-    recurring_display = nice_columns(recurring[["activity", "total_attendances", "number_of_sessions", "avg_attendance_per_session", "returning_members", "retention_score", "unique_seniors"]])
+    cols = ["activity", "total_attendances", "number_of_sessions", "avg_attendance_per_session", "returning_members", "retention_score", "unique_seniors"]
+    cols = [c for c in cols if c in recurring.columns]
+    recurring_display = nice_columns(recurring[cols])
     recurring_sorted = sortable_table(recurring_display, "Recurring Programmes", "recurring", default_sort="Avg Attendance Per Session", default_ascending=False)
     bar_chart(recurring_sorted.head(20), "Activity", "Avg Attendance Per Session", "Recurring Programmes by Average Attendance per Session", key="recurring_chart")
 else:
     st.info("No recurring programmes found for this filter.")
 
 st.markdown("## Male Participation Analysis")
-male_display = activity_stats[["activity", "programme_type", "male_attendances", "unique_male_attendances", "male_pct", "unique_male_pct", "total_attendances", "unique_seniors", "sample_note"]].copy()
+male_cols = ["activity", "programme_type", "male_attendances", "unique_male_attendances", "male_pct", "unique_male_pct", "total_attendances", "unique_seniors", "sample_note"]
+male_cols = [c for c in male_cols if c in activity_stats.columns]
+male_display = activity_stats[male_cols].copy()
 male_sorted = sortable_table(
     nice_columns(male_display),
     "Male Attendances and Unique Male Attendances by Activity",
@@ -1891,16 +1816,8 @@ with chart_right:
     male_unique_sorted = male_sorted.sort_values("Unique Male Attendances", ascending=False)
     bar_chart(male_unique_sorted.head(20), "Activity", "Unique Male Attendances", "Unique Male Attendances by Activity", color="Programme Type", key="male_unique_chart")
 
-st.markdown("## Programme Recommendations")
-rec_df = build_recommendations(activity_stats)
-rec_sorted = sortable_table(
-    nice_columns(rec_df),
-    "Recommendations",
-    "recommendations",
-    default_sort="Activity",
-    default_ascending=True,
-    help_text="Recommendations are based on attendance, reach, retention, and male participation patterns.",
-)
+# Save only aggregate values. Unsupported recommendation outputs are intentionally removed.
+rec_df = pd.DataFrame()
 save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, rec_df)
 st.caption("Saved aggregate KPI/chart values in the app. Names and phone numbers were not saved.")
 
