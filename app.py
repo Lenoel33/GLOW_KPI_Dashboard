@@ -1052,6 +1052,30 @@ kpis = {
 st.markdown("## KPI Overview")
 st.caption("KPI Overview uses the same cleaned Attended rows as the senior-frequency and inactive-senior tables, so IB/OB counts stay consistent across the dashboard.")
 
+# Compare against the workbook Summary sheet when it exists. The Summary is useful
+# for reference, but the dashboard uses cleaned attendance rows as the live source
+# of truth because the Summary/Unique Seniors sheets can contain formula errors,
+# blanks, or missed attendance-register tabs.
+if isinstance(summary_kpis, dict) and summary_kpis:
+    summary_unique = int(summary_kpis.get("unique_members", 0) or 0)
+    summary_ib = int(summary_kpis.get("ib_count", 0) or 0)
+    summary_ob = int(summary_kpis.get("ob_count", 0) or 0)
+    summary_att = int(summary_kpis.get("attendances", 0) or 0)
+    mismatches = []
+    if summary_att and summary_att != total_attendances:
+        mismatches.append(f"Attendances: Summary {summary_att:,} vs cleaned rows {total_attendances:,}")
+    if summary_unique and summary_unique != total_unique_seniors:
+        mismatches.append(f"Unique Members: Summary {summary_unique:,} vs cleaned rows {total_unique_seniors:,}")
+    if summary_ib and summary_ib != ib_count:
+        mismatches.append(f"IB: Summary {summary_ib:,} vs cleaned rows {ib_count:,}")
+    if summary_ob and summary_ob != ob_count:
+        mismatches.append(f"OB: Summary {summary_ob:,} vs cleaned rows {ob_count:,}")
+    if mismatches:
+        st.warning(
+            "Workbook Summary check found differences: " + "; ".join(mismatches) +
+            ". The dashboard is showing the cleaned attendance-register values so IB + OB tallies to Unique Members."
+        )
+
 render_kpi_cards([
     ("Programmes", f"{total_activities:,}"),
     ("Attendances", f"{total_attendances:,}"),
