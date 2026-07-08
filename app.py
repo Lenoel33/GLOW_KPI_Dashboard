@@ -123,6 +123,24 @@ st.markdown(
         .kpi-grid { grid-template-columns: 1fr; gap: 14px; }
         .kpi-card { min-height: 120px; padding: 20px 22px; }
     }
+    .group-section-title {
+        margin: 20px 0 10px 0;
+        padding: 10px 14px;
+        border-left: 6px solid #C45D2D;
+        background: rgba(243, 232, 210, 0.65);
+        border-radius: 10px;
+        color: #0D2B45;
+        font-weight: 800;
+        font-size: 1.25rem;
+    }
+    .section-divider {
+        height: 1px;
+        background: #E9D6B3;
+        margin: 18px 0;
+    }
+    .stTabs [data-baseweb="tab-list"] { gap: 14px; border-bottom: 2px solid #E9D6B3; }
+    .stTabs [data-baseweb="tab"] { font-size: 1rem; font-weight: 650; }
+    .stTabs [aria-selected="true"] { color: #FF4B4B; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -152,6 +170,11 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+# Streamlit reruns on widget interaction. On newer Streamlit versions,
+# @st.fragment keeps interactive profile/filter blocks from forcing the whole
+# page to redraw, which reduces the browser jumping back to the top.
+streamlit_fragment = getattr(st, "fragment", lambda func=None, **kwargs: (lambda f: f) if func is None else func)
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -506,6 +529,53 @@ def sortable_table(
         key=f"{key}_download",
     )
     return sorted_df
+
+
+def normalize_group_label(value) -> str:
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", ""}:
+        return "Unknown"
+    return text
+
+
+def render_grouped_tables(
+    df: pd.DataFrame,
+    group_col: str,
+    table_title_prefix: str,
+    table_key_prefix: str,
+    default_sort: str = "Attendances",
+    default_ascending: bool = False,
+    help_text: str | None = None,
+):
+    """Display a dataframe as clearly separated group tabs.
+
+    This is used whenever the dashboard compares fields such as IB/OB or Gender,
+    so users can immediately see that the data is separated instead of mixed.
+    """
+    if df is None or df.empty or group_col not in df.columns:
+        st.info("No data available for this section.")
+        return
+
+    temp = df.copy()
+    temp[group_col] = temp[group_col].apply(normalize_group_label)
+
+    preferred_order = ["IB", "OB", "Male", "Female", "Unknown"]
+    groups = [g for g in preferred_order if g in set(temp[group_col])]
+    groups += sorted([g for g in temp[group_col].dropna().unique() if g not in groups])
+
+    tabs = st.tabs([f"{g} ({len(temp[temp[group_col] == g]):,})" for g in groups])
+    for tab, group in zip(tabs, groups):
+        with tab:
+            st.markdown(f"<div class='group-section-title'>{html_lib.escape(group)}</div>", unsafe_allow_html=True)
+            out = temp[temp[group_col] == group].drop(columns=[group_col], errors="ignore")
+            sortable_table(
+                out,
+                f"{table_title_prefix} - {group}",
+                f"{table_key_prefix}_{str(group).lower().replace(' ', '_').replace('/', '_')}",
+                default_sort=default_sort,
+                default_ascending=default_ascending,
+                help_text=help_text,
+            )
 
 def bar_chart(df, x, y, title, color=None, key=None):
     if df.empty or x not in df.columns or y not in df.columns:
@@ -1572,16 +1642,28 @@ profile_tab, type_tab, pref_tab = st.tabs([
 ])
 
 with profile_tab:
-    profile_summary = make_profile_summary(df_att)
-    sortable_table(
-        nice_columns(profile_summary),
-        "Senior Engagement Profiles by IB/OB and Gender",
-        "senior_profile_summary",
-        default_sort="Seniors",
-        default_ascending=False,
-        help_text="Profiles are based on total attendance frequency: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
-    )
-    if not profile_summary.empty:
+    profile_summary = nice_columns(make_profile_summary(df_att))
+    st.caption("Engagement profiles are separated by IB/OB first, then you can sort inside each table.")
+    if "IB OB" in profile_summary.columns:
+        render_grouped_tables(
+            profile_summary,
+            "IB OB",
+            "Senior Engagement Profiles",
+            "senior_profile_summary",
+            default_sort="Seniors",
+            default_ascending=False,
+            help_text="Profiles are based on total attendance frequency: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
+        )
+    else:
+        sortable_table(
+            profile_summary,
+            "Senior Engagement Profiles by IB/OB and Gender",
+            "senior_profile_summary",
+            default_sort="Seniors",
+            default_ascending=False,
+            help_text="Profiles are based on total attendance frequency: Super Active ≥20, Active 10–19, Regular 5–9, Occasional 3–4, Low/Inactive ≤2.",
+        )
+    if not profile_summary.empty and "Engagement Profile" in profile_summary.columns:
         chart_df = profile_summary.groupby("Engagement Profile", as_index=False)["Seniors"].sum()
         bar_chart(chart_df, "Engagement Profile", "Seniors", "Number of Seniors by Engagement Profile", key="engagement_profile_chart")
     st.info("Living-alone analysis is not shown because the current KPI workbook does not contain a living arrangement field. Add a 'Living Arrangement' column later to unlock this view.")
@@ -1604,30 +1686,67 @@ with type_tab:
             bar_chart(programme_type_overview, "Programme Type", "Attendances", "Attendances by Programme Type", key="programme_type_attendances_chart")
 
 with pref_tab:
-    preference_profile = st.selectbox(
-        "Choose profile for programme preference analysis",
-        ["IB/OB", "Gender", "Programme Category"],
-        key="preference_profile_selector",
-    )
-    if preference_profile == "IB/OB":
+    st.markdown("### Programme Preferences by Clearly Separated Groups")
+    st.caption("IB/OB, Gender, and Programme Category are shown in separate tabs so the groups are never visually mixed.")
+
+    by_ibob_tab, by_gender_tab, by_category_tab = st.tabs([
+        "IB / OB",
+        "Gender",
+        "Programme Category",
+    ])
+
+    with by_ibob_tab:
         pref_df = make_profile_programme_preferences(df_att, "ib_ob_clean")
-    elif preference_profile == "Gender":
-        pref_df = make_profile_programme_preferences(df_att, "gender_clean")
-    else:
-        pref_df = df_att.groupby(["programme_category", "activity", "programme_type"], dropna=False).agg(
+        pref_df = nice_columns(pref_df)
+        if "Profile" in pref_df.columns:
+            render_grouped_tables(
+                pref_df,
+                "Profile",
+                "Programme Preferences by IB/OB",
+                "programme_preferences_ib_ob",
+                default_sort="Attendances",
+                default_ascending=False,
+                help_text="Each tab shows programme preferences for that profile only.",
+            )
+        else:
+            st.info("No IB/OB preference data available.")
+
+    with by_gender_tab:
+        gender_pref_df = make_profile_programme_preferences(df_att, "gender_clean")
+        gender_pref_df = nice_columns(gender_pref_df)
+        if "Profile" in gender_pref_df.columns:
+            render_grouped_tables(
+                gender_pref_df,
+                "Profile",
+                "Programme Preferences by Gender",
+                "programme_preferences_gender",
+                default_sort="Attendances",
+                default_ascending=False,
+                help_text="Each tab shows programme preferences for one gender group only.",
+            )
+        else:
+            st.info("No gender preference data available.")
+
+    with by_category_tab:
+        category_pref_df = df_att.groupby(["programme_category", "activity", "programme_type"], dropna=False).agg(
             Attendances=("member", "count"),
             Unique_Seniors=("member", pd.Series.nunique),
         ).reset_index().rename(columns={"programme_category": "Profile", "activity": "Programme", "programme_type": "Programme Type"})
-        pref_df["Share Within Profile"] = pref_df["Attendances"] / pref_df.groupby("Profile")["Attendances"].transform("sum").replace(0, np.nan)
-        pref_df = pref_df.sort_values(["Profile", "Attendances"], ascending=[True, False]).reset_index(drop=True)
-    sortable_table(
-        nice_columns(pref_df),
-        f"Programme Preferences by {preference_profile}",
-        "programme_preferences_by_profile",
-        default_sort="Attendances",
-        default_ascending=False,
-        help_text="Use this to see what kinds of programmes appeal to each profile group that exists in the KPI workbook.",
-    )
+        category_pref_df["Share Within Profile"] = category_pref_df["Attendances"] / category_pref_df.groupby("Profile")["Attendances"].transform("sum").replace(0, np.nan)
+        category_pref_df = category_pref_df.sort_values(["Profile", "Attendances"], ascending=[True, False]).reset_index(drop=True)
+        category_pref_df = nice_columns(category_pref_df)
+        if "Profile" in category_pref_df.columns:
+            render_grouped_tables(
+                category_pref_df,
+                "Profile",
+                "Programme Preferences by Category",
+                "programme_preferences_category",
+                default_sort="Attendances",
+                default_ascending=False,
+                help_text="Each tab shows programmes within one category only.",
+            )
+        else:
+            st.info("No category preference data available.")
 
 st.markdown("## IB Preferences")
 st.caption("This section focuses only on IB seniors and shows which programmes they prefer, their favourite activity, and individual programme patterns.")
@@ -1666,47 +1785,62 @@ with ib_fav_tab:
     )
 
 with ib_gender_tab:
-    ib_gender_prefs = make_ib_gender_preferences(df_att)
-    sortable_table(
-        nice_columns(ib_gender_prefs),
-        "IB Programme Preferences by Gender",
-        "ib_gender_preferences",
-        default_sort="Attendances",
-        default_ascending=False,
-        help_text="Useful for identifying which activities appeal more to male or female IB seniors.",
-    )
-
-with ib_profile_tab:
-    ib_names = sorted(df_att.loc[df_att["ib_ob_clean"] == "IB", "member"].dropna().astype(str).str.strip().unique())
-    if not ib_names:
-        st.info("No IB seniors found in the cleaned attendance rows.")
-    else:
-        selected_ib_senior = st.selectbox("Select an IB senior", ib_names, key="ib_profile_card_select")
-        senior_breakdown = make_senior_programme_breakdown(df_att, selected_ib_senior)
-        senior_rows = df_att[df_att["member"].astype(str).str.strip() == selected_ib_senior]
-        total_att = len(senior_rows)
-        unique_prog = senior_rows["activity"].nunique() if not senior_rows.empty else 0
-        latest = pd.to_datetime(senior_rows["date"], errors="coerce").max().date() if "date" in senior_rows.columns and not senior_rows.empty else ""
-        fav = senior_breakdown.iloc[0]["Programme"] if not senior_breakdown.empty else "-"
-        render_kpi_cards([
-            ("Selected IB Senior", selected_ib_senior),
-            ("Total Attendances", f"{total_att:,}"),
-            ("Unique Programmes", f"{unique_prog:,}"),
-            ("Favourite Programme", fav),
-            ("Engagement Profile", make_profile_label(total_att)),
-            ("Diversity Profile", make_diversity_label(unique_prog)),
-            ("Latest Attendance", str(latest)),
-            ("IB/OB", "IB"),
-        ])
-        sortable_table(
-            senior_breakdown,
-            f"Programme Breakdown for {selected_ib_senior}",
-            "selected_ib_senior_breakdown",
+    ib_gender_prefs = nice_columns(make_ib_gender_preferences(df_att))
+    if "Profile" in ib_gender_prefs.columns:
+        render_grouped_tables(
+            ib_gender_prefs,
+            "Profile",
+            "IB Programme Preferences by Gender",
+            "ib_gender_preferences",
             default_sort="Attendances",
             default_ascending=False,
+            help_text="Male and female IB preferences are separated into clear tabs instead of being mixed in one table.",
         )
-        if not senior_breakdown.empty:
-            bar_chart(senior_breakdown, "Programme", "Attendances", f"{selected_ib_senior}'s Programme Preferences", color="Programme Type", key="selected_ib_senior_chart")
+    else:
+        st.info("No IB gender preference data available.")
+
+@streamlit_fragment
+def render_ib_profile_card_section(att_df: pd.DataFrame):
+    ib_names = sorted(att_df.loc[att_df["ib_ob_clean"] == "IB", "member"].dropna().astype(str).str.strip().unique())
+    if not ib_names:
+        st.info("No IB seniors found in the cleaned attendance rows.")
+        return
+
+    st.caption("Use the selector below to update only this profile-card section where supported by Streamlit. The selected senior is saved in session state.")
+    selected_ib_senior = st.selectbox(
+        "Select an IB senior",
+        ib_names,
+        key="ib_profile_card_select",
+        help="Selection is stored in session state so the chosen senior stays selected after refreshes.",
+    )
+    senior_breakdown = make_senior_programme_breakdown(att_df, selected_ib_senior)
+    senior_rows = att_df[att_df["member"].astype(str).str.strip() == selected_ib_senior]
+    total_att = len(senior_rows)
+    unique_prog = senior_rows["activity"].nunique() if not senior_rows.empty else 0
+    latest = pd.to_datetime(senior_rows["date"], errors="coerce").max().date() if "date" in senior_rows.columns and not senior_rows.empty else ""
+    fav = senior_breakdown.iloc[0]["Programme"] if not senior_breakdown.empty else "-"
+    render_kpi_cards([
+        ("Selected IB Senior", selected_ib_senior),
+        ("Total Attendances", f"{total_att:,}"),
+        ("Unique Programmes", f"{unique_prog:,}"),
+        ("Favourite Programme", fav),
+        ("Engagement Profile", make_profile_label(total_att)),
+        ("Diversity Profile", make_diversity_label(unique_prog)),
+        ("Latest Attendance", str(latest)),
+        ("IB/OB", "IB"),
+    ])
+    sortable_table(
+        senior_breakdown,
+        f"Programme Breakdown for {selected_ib_senior}",
+        "selected_ib_senior_breakdown",
+        default_sort="Attendances",
+        default_ascending=False,
+    )
+    if not senior_breakdown.empty:
+        bar_chart(senior_breakdown, "Programme", "Attendances", f"{selected_ib_senior}'s Programme Preferences", color="Programme Type", key="selected_ib_senior_chart")
+
+with ib_profile_tab:
+    render_ib_profile_card_section(df_att)
 
 st.markdown("## Activity Insights")
 summary_cols = [
