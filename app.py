@@ -981,46 +981,53 @@ raw_male_unique_members = int(df_att[df_att["gender_clean"] == "Male"]["member"]
 raw_male_attendance_pct = raw_male_attendances / raw_total_attendances if raw_total_attendances else 0
 raw_male_unique_pct = raw_male_unique_members / raw_total_unique_seniors if raw_total_unique_seniors else 0
 
-# KPI Overview must always use the workbook Summary sheet when available.
-# Programme-type filters only affect charts and drill-down tables below.
-use_summary_kpis = bool(summary_kpis)
-if use_summary_kpis:
-    total_attendances = int(summary_kpis.get("attendances", 0))
-    total_unique_seniors = int(summary_kpis.get("unique_members", raw_total_unique_seniors))
-    total_activities = int(summary_kpis.get("programmes", raw_total_activities))
-    avg_attendance_per_activity = float(summary_kpis.get("avg_attendance_per_programme", 0))
-    # Summary columns IB (%), OB (%), Male (%), and Inactive (<=2AAP) (%) store count + percentage.
-    # We display the count from Summary and calculate the percentage using Summary Unique Members.
-    male_attendances = int(summary_kpis.get("male_count", raw_male_attendances))
-    male_unique_members = int(summary_kpis.get("male_count", raw_male_unique_members))
-    male_attendance_pct = float(summary_kpis.get("male_pct", 0))
-    male_unique_pct = float(summary_kpis.get("male_pct", 0))
-    ib_count = int(summary_kpis.get("ib_count", 0))
-    ob_count = int(summary_kpis.get("ob_count", 0))
-    inactive_count = int(summary_kpis.get("inactive_count", 0))
-    new_ib = int(summary_kpis.get("new_ib", 0))
-    new_ob = int(summary_kpis.get("new_ob", 0))
-    ib_pct = float(summary_kpis.get("ib_pct", 0))
-    ob_pct = float(summary_kpis.get("ob_pct", 0))
-    inactive_pct = float(summary_kpis.get("inactive_pct", 0))
-else:
-    total_attendances = raw_total_attendances
-    total_unique_seniors = raw_total_unique_seniors
-    total_activities = raw_total_activities
-    avg_attendance_per_activity = raw_avg_attendance_per_activity
-    male_attendances = raw_male_attendances
-    male_unique_members = raw_male_unique_members
-    male_attendance_pct = raw_male_attendance_pct
-    male_unique_pct = raw_male_unique_pct
-    ib_count = int((df_att["ib_ob_clean"] == "IB").sum())
-    ob_count = int((df_att["ib_ob_clean"] == "OB").sum())
-    inactive_count = 0
-    new_ib = 0
-    new_ob = 0
-    denominator = total_unique_seniors if total_unique_seniors else 0
-    ib_pct = ib_count / denominator if denominator else 0
-    ob_pct = ob_count / denominator if denominator else 0
-    inactive_pct = 0
+# KPI Overview and all detail tables must use ONE source of truth: df_att.
+# Do not mix the workbook Summary sheet with cleaned attendance rows, because that
+# makes the KPI cards disagree with the IB/OB attendance-frequency tables.
+# Summary is still read elsewhere for reference/centre comparisons, but member KPIs
+# below are calculated from the same cleaned attended rows used by the tables.
+valid_member_rows = df_att.copy()
+valid_member_rows["member"] = valid_member_rows["member"].astype(str).str.strip()
+valid_member_rows = valid_member_rows[
+    (valid_member_rows["member"] != "")
+    & (valid_member_rows["member"].str.lower() != "nan")
+].copy()
+
+ib_members = set(valid_member_rows.loc[valid_member_rows["ib_ob_clean"] == "IB", "member"].dropna().astype(str).str.strip())
+ob_members = set(valid_member_rows.loc[valid_member_rows["ib_ob_clean"] == "OB", "member"].dropna().astype(str).str.strip())
+male_members = set(valid_member_rows.loc[valid_member_rows["gender_clean"] == "Male", "member"].dropna().astype(str).str.strip())
+
+total_attendances = raw_total_attendances
+total_unique_seniors = int(valid_member_rows["member"].nunique())
+total_activities = raw_total_activities
+avg_attendance_per_activity = raw_avg_attendance_per_activity
+male_attendances = raw_male_attendances
+male_unique_members = len(male_members)
+male_attendance_pct = raw_male_attendance_pct
+male_unique_pct = male_unique_members / total_unique_seniors if total_unique_seniors else 0
+ib_count = len(ib_members)
+ob_count = len(ob_members)
+# Inactive is a member-level KPI: highest recorded AAP count for the senior <= 2.
+inactive_count = 0
+if "aap" in df.columns:
+    inactive_kpi_source = df.copy()
+    inactive_kpi_source["member"] = inactive_kpi_source["member"].astype(str).str.strip()
+    inactive_kpi_source = inactive_kpi_source[
+        (inactive_kpi_source["member"] != "")
+        & (inactive_kpi_source["member"].str.lower() != "nan")
+    ].copy()
+    inactive_kpi_source["aap"] = pd.to_numeric(inactive_kpi_source["aap"], errors="coerce")
+    inactive_kpi_source = inactive_kpi_source.dropna(subset=["aap"])
+    if not inactive_kpi_source.empty:
+        inactive_by_member = inactive_kpi_source.groupby("member", as_index=False)["aap"].max()
+        inactive_count = int((inactive_by_member["aap"] <= 2).sum())
+
+new_ib = int(summary_kpis.get("new_ib", 0)) if isinstance(summary_kpis, dict) else 0
+new_ob = int(summary_kpis.get("new_ob", 0)) if isinstance(summary_kpis, dict) else 0
+ib_pct = ib_count / total_unique_seniors if total_unique_seniors else 0
+ob_pct = ob_count / total_unique_seniors if total_unique_seniors else 0
+inactive_pct = inactive_count / total_unique_seniors if total_unique_seniors else 0
+use_summary_kpis = False
 
 kpis = {
     "total_attendances": total_attendances,
@@ -1039,15 +1046,11 @@ kpis = {
     "inactive_pct": inactive_pct,
     "new_ib": new_ib,
     "new_ob": new_ob,
-    "kpi_source": "Summary sheet" if use_summary_kpis else "Cleaned attendance rows",
+    "kpi_source": "Cleaned attendance rows",
 }
 
 st.markdown("## KPI Overview")
-if use_summary_kpis:
-    source_detail = summary_kpis.get("source_detail", "Summary sheet") if isinstance(summary_kpis, dict) else "Summary sheet"
-    st.caption(f"KPI Overview is locked to the workbook Summary sheet ({source_detail}). It is not recalculated from raw rows.")
-else:
-    st.warning("No Summary sheet OVERALL TOTAL row was found for the selected centre. KPI cards are calculated from cleaned attendance rows only.")
+st.caption("KPI Overview uses the same cleaned Attended rows as the senior-frequency and inactive-senior tables, so IB/OB counts stay consistent across the dashboard.")
 
 render_kpi_cards([
     ("Programmes", f"{total_activities:,}"),
@@ -1144,10 +1147,10 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
         temp["activity"] = temp["member"]
 
     group_cols = ["member"]
-    if "centre" in temp.columns:
-        group_cols = ["centre", "member"]
 
     agg_fields = {"activity": ["count", pd.Series.nunique]}
+    if "centre" in temp.columns:
+        agg_fields["centre"] = "first"
     if "date" in temp.columns:
         agg_fields["date"] = "max"
     if "gender_clean" in temp.columns:
@@ -1163,7 +1166,7 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
     ]
 
     rename_cols = {
-        "centre": "Centre",
+        "centre_first": "Centre",
         "member": "Senior Name",
         "activity_count": "Attendances",
         "activity_nunique": "Unique Activities",
@@ -1197,6 +1200,13 @@ st.caption("These tables count every cleaned `Attended` row across the attendanc
 
 ib_senior_freq = make_senior_attendance_frequency(df_att, "IB", selected_centre)
 ob_senior_freq = make_senior_attendance_frequency(df_att, "OB", selected_centre)
+
+# These should now tally with KPI Overview because both use df_att.
+if len(ib_senior_freq) != ib_count or len(ob_senior_freq) != ob_count:
+    st.warning(
+        "Internal check: KPI IB/OB counts do not match the attendance-frequency tables. "
+        "Please use Clear uploaded data and re-upload the workbook. If this persists, check for duplicated names with different spellings."
+    )
 
 ib_tab, ob_tab = st.tabs([f"IB Seniors ({len(ib_senior_freq):,})", f"OB Seniors ({len(ob_senior_freq):,})"])
 with ib_tab:

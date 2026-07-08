@@ -8,3 +8,8 @@ Key fix:
 - Charts and detailed tables can still use attendance/programme rows.
 
 Upload the files inside this folder to GitHub. Do not upload the ZIP itself.
+
+## v24 consistency fix
+- KPI Overview IB/OB/Unique Member counts now use the same cleaned `Attended` rows as the Senior Attendance Frequency tables.
+- IB/OB attendance-frequency rows are grouped by senior name so tab counts tally with KPI cards.
+- Inactive KPI uses the highest recorded AAP count per senior and the same member-level logic as the inactive list.
