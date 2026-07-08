@@ -743,6 +743,10 @@ with st.spinner("Reading uploaded file(s)..."):
         df_one, sheet_names_one = read_uploaded_file(file)
         if not df_one.empty:
             df_one = df_one.copy()
+            # Keep the selected/uploaded centre in a protected helper column.
+            # Some workbooks may already contain a blank/duplicate Centre column,
+            # so relying only on "centre" can leave the displayed Centre column empty.
+            df_one["__uploaded_centre__"] = centre_name
             df_one["centre"] = centre_name
             centre_frames[centre_name] = df_one
         centre_summary_kpis[centre_name] = df_one.attrs.get("summary_kpis", {}) if hasattr(df_one, "attrs") else {}
@@ -1060,7 +1064,24 @@ if len(centre_summary_kpis) > 1 and not centre_kpi_table.empty:
     )
 
 # Senior attendance frequency by IB/OB status
-def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str) -> pd.DataFrame:
+def _collapse_duplicate_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Collapse duplicated column labels by taking the first non-blank value row-wise."""
+    if frame is None or frame.empty:
+        return pd.DataFrame()
+    data = {}
+    for col in dict.fromkeys(list(frame.columns)):
+        subset = frame.loc[:, frame.columns == col]
+        if isinstance(subset, pd.Series):
+            data[col] = subset
+        elif subset.shape[1] == 1:
+            data[col] = subset.iloc[:, 0]
+        else:
+            cleaned_subset = subset.replace(r"^\s*$", pd.NA, regex=True)
+            data[col] = cleaned_subset.bfill(axis=1).iloc[:, 0]
+    return pd.DataFrame(data)
+
+
+def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str, fallback_centre: str | None = None) -> pd.DataFrame:
     """Count attended rows for each senior by IB/OB status.
 
     This helper is intentionally defensive because uploaded Excel workbooks can
@@ -1074,9 +1095,25 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str)
 
     temp = source_df.copy()
 
-    # Remove duplicated column labels. Keep the first occurrence because the
-    # dashboard's cleaned columns are created first and are the source of truth.
-    temp = temp.loc[:, ~pd.Index(temp.columns).duplicated(keep="first")].copy()
+    # Collapse duplicated column labels. This is safer than simply keeping the
+    # first duplicate because some workbooks contain a blank Centre column before
+    # the dashboard's uploaded-centre value.
+    temp = _collapse_duplicate_columns(temp).copy()
+
+    if "__uploaded_centre__" in temp.columns:
+        uploaded_centre = temp["__uploaded_centre__"].astype(str).str.strip()
+        if "centre" not in temp.columns:
+            temp["centre"] = uploaded_centre
+        else:
+            centre_text = temp["centre"].astype(str).str.strip()
+            temp["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), uploaded_centre)
+
+    if fallback_centre and fallback_centre != "All Centres":
+        if "centre" not in temp.columns:
+            temp["centre"] = fallback_centre
+        else:
+            centre_text = temp["centre"].astype(str).str.strip()
+            temp["centre"] = centre_text.mask(centre_text.eq("") | centre_text.str.lower().eq("nan"), fallback_centre)
 
     required_cols = {"member", "ib_ob_clean"}
     if not required_cols.issubset(set(temp.columns)):
@@ -1146,8 +1183,8 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str)
 st.markdown("## Senior Attendance Frequency")
 st.caption("These tables count every cleaned `Attended` row across the attendance sheets for the selected centre/view.")
 
-ib_senior_freq = make_senior_attendance_frequency(df_att, "IB")
-ob_senior_freq = make_senior_attendance_frequency(df_att, "OB")
+ib_senior_freq = make_senior_attendance_frequency(df_att, "IB", selected_centre)
+ob_senior_freq = make_senior_attendance_frequency(df_att, "OB", selected_centre)
 
 ib_tab, ob_tab = st.tabs([f"IB Seniors ({len(ib_senior_freq):,})", f"OB Seniors ({len(ob_senior_freq):,})"])
 with ib_tab:
