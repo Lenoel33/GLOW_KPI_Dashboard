@@ -267,19 +267,15 @@ def read_uploaded_file(uploaded_file):
 
     skip_terms = ("summary", "unique", "template")
 
-    # Use all real attendance-register tabs, including common naming variants.
-    # Some GLOW files contain official tabs named with plural "Attendances",
-    # while later imports may use singular "Attendance" or the typo "Attendnace".
-    # Excluding those tabs made Summary totals and dashboard details disagree
-    # because valid attended rows from those dates were missed.
-    #
-    # Plain date sheets such as "4May2026" are still excluded because they can be
-    # copied duplicates of the official register. The de-duplication below also
-    # protects against accidental duplicate attendance tabs for the same date.
-    attendance_name_pattern = re.compile(r"\b(attendance|attendances|attendnace|attendnaces)\b", re.IGNORECASE)
+    # Use only the official exported attendance registers.
+    # In GLOW workbooks, approved register tabs are named like
+    # "8May2026 Attendances". Some files also contain copied/import tabs such as
+    # "8May2026" or singular/typo variants like "01July2026 Attendance" /
+    # "29June2026 Attendnace". Those extra tabs can duplicate or inflate the
+    # senior-frequency tables, so they are excluded from member attendance counts.
     official_attendance_items = [
         (s, d) for s, d in raw_sheets.items()
-        if attendance_name_pattern.search(str(s).strip())
+        if re.search(r"\battendances\b", str(s).strip().lower())
         and not any(t in str(s).lower() for t in skip_terms)
     ]
     candidate_items = official_attendance_items or [
@@ -298,11 +294,29 @@ def read_uploaded_file(uploaded_file):
     if frames:
         combined = pd.concat(frames, ignore_index=True, sort=False)
 
-        # Do not de-duplicate rows here. The Summary sheet's Attendances total
-        # counts every Attended row in the attendance registers, and the senior
-        # frequency tables are explicitly row-frequency reports. Excluding plain
-        # date-only copied sheets above prevents the old double-counting problem
-        # without accidentally removing legitimate repeated attendance rows.
+        # Read every real attendance sheet, then remove duplicate attendance records.
+        # Some workbooks contain both exported sheets and copied/raw sheets for the
+        # same date, for example "4May2026 Attendances" and "4May2026". These
+        # copies may have different AAP counts/ages because the source was exported
+        # at a different time, so those changing fields must NOT be part of the
+        # duplicate key.
+        #
+        # A real repeat attendance is still protected because the date and activity
+        # remain in the key. One senior attending two different activities on the
+        # same date will still count twice, while the same senior/activity/status
+        # copied across duplicate sheets will count once.
+        key_cols = [
+            "__sheet_date__",
+            "Activity Name",
+            "Status",
+            "Name",
+        ]
+        key_cols = [c for c in key_cols if c in combined.columns]
+        if key_cols:
+            dedupe_key = combined[key_cols].copy()
+            for c in key_cols:
+                dedupe_key[c] = dedupe_key[c].astype(str).str.strip().str.lower()
+            combined = combined.loc[~dedupe_key.duplicated()].copy()
 
         out = combined.reset_index(drop=True)
         out.attrs["summary_kpis"] = summary_kpis
