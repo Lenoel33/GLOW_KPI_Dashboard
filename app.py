@@ -1423,16 +1423,31 @@ repeat_counts = df_att.groupby(["activity", "member"]).size().reset_index(name="
 returning = repeat_counts[repeat_counts["cnt"] > 1].groupby("activity")["member"].nunique().reset_index(name="returning_members")
 activity_stats = activity_stats.merge(returning, on="activity", how="left").fillna({"returning_members": 0})
 
+# Gender attendance counts are calculated from the same cleaned attended rows used for total attendances.
+# Important: male_attendances is NOT total programme attendance; it is the subset where Gender == Male.
 male_activity = (
     df_att[df_att["gender_clean"] == "Male"]
     .groupby("activity")
     .agg(male_attendances=("member", "count"), unique_male_attendances=("member", pd.Series.nunique))
     .reset_index()
 )
+female_activity = (
+    df_att[df_att["gender_clean"] == "Female"]
+    .groupby("activity")
+    .agg(female_attendances=("member", "count"), unique_female_attendances=("member", pd.Series.nunique))
+    .reset_index()
+)
 activity_stats = activity_stats.merge(male_activity, on="activity", how="left")
-activity_stats[["male_attendances", "unique_male_attendances"]] = activity_stats[["male_attendances", "unique_male_attendances"]].fillna(0).astype(int)
+activity_stats = activity_stats.merge(female_activity, on="activity", how="left")
+gender_count_cols = [
+    "male_attendances", "unique_male_attendances",
+    "female_attendances", "unique_female_attendances",
+]
+activity_stats[gender_count_cols] = activity_stats[gender_count_cols].fillna(0).astype(int)
 activity_stats["male_pct"] = activity_stats["male_attendances"] / activity_stats["total_attendances"].replace(0, np.nan)
 activity_stats["unique_male_pct"] = activity_stats["unique_male_attendances"] / activity_stats["unique_seniors"].replace(0, np.nan)
+activity_stats["female_pct"] = activity_stats["female_attendances"] / activity_stats["total_attendances"].replace(0, np.nan)
+activity_stats["unique_female_pct"] = activity_stats["unique_female_attendances"] / activity_stats["unique_seniors"].replace(0, np.nan)
 activity_stats["sample_note"] = np.where(activity_stats["unique_seniors"] < 10, "Small sample", "")
 
 if "date" in df_att.columns:
@@ -1820,21 +1835,55 @@ def render_ib_profile_card_section(att_df: pd.DataFrame):
         st.info("No IB seniors found in the cleaned attendance rows.")
         return
 
-    st.caption("Use the selector below to view one IB senior. The selected senior is saved in session state.")
-    selected_ib_senior = st.selectbox(
+    # Keep the displayed profile card locked to the latest selected value.
+    # In Streamlit, widgets rerun the script; using a stable session-state
+    # value prevents the selectbox from visually changing while the card still
+    # shows the previous senior.
+    if st.session_state.get("ib_profile_selected_senior") not in ib_names:
+        st.session_state["ib_profile_selected_senior"] = ib_names[0]
+
+    def sync_ib_profile_selection():
+        chosen = st.session_state.get("ib_profile_card_select")
+        if chosen in ib_names:
+            st.session_state["ib_profile_selected_senior"] = chosen
+
+    st.caption("Use the selector below to view one IB senior. Gender is taken from the cleaned attendance rows in the KPI workbook.")
+    current_index = ib_names.index(st.session_state["ib_profile_selected_senior"])
+    selected_widget_value = st.selectbox(
         "Select an IB senior",
         ib_names,
+        index=current_index,
         key="ib_profile_card_select",
-        help="Selection is stored in session state so the chosen senior stays selected after refreshes.",
+        on_change=sync_ib_profile_selection,
+        help="Selection is stored in session state so the profile card updates to the selected senior.",
     )
+    selected_ib_senior = st.session_state.get("ib_profile_selected_senior", selected_widget_value)
+    if selected_ib_senior not in ib_names:
+        selected_ib_senior = selected_widget_value
+        st.session_state["ib_profile_selected_senior"] = selected_ib_senior
+
     senior_breakdown = make_senior_programme_breakdown(att_df, selected_ib_senior)
     senior_rows = att_df[att_df["member"].astype(str).str.strip() == selected_ib_senior]
     total_att = len(senior_rows)
     unique_prog = senior_rows["activity"].nunique() if not senior_rows.empty else 0
     latest = pd.to_datetime(senior_rows["date"], errors="coerce").max().date() if "date" in senior_rows.columns and not senior_rows.empty else ""
     fav = senior_breakdown.iloc[0]["Programme"] if not senior_breakdown.empty else "-"
+
+    gender = "Unknown"
+    if not senior_rows.empty:
+        if "gender_clean" in senior_rows.columns:
+            gender_values = senior_rows["gender_clean"].dropna().astype(str).str.strip()
+        elif "gender" in senior_rows.columns:
+            gender_values = senior_rows["gender"].apply(clean_gender).dropna().astype(str).str.strip()
+        else:
+            gender_values = pd.Series(dtype=str)
+        gender_values = gender_values[~gender_values.str.lower().isin(["", "nan", "none", "unknown"])]
+        if not gender_values.empty:
+            gender = gender_values.mode().iloc[0]
+
     render_kpi_cards([
         ("Selected IB Senior", selected_ib_senior),
+        ("Gender", gender),
         ("Total Attendances", f"{total_att:,}"),
         ("Unique Programmes", f"{unique_prog:,}"),
         ("Favourite Programme", fav),
@@ -1858,8 +1907,9 @@ with ib_profile_tab:
 st.markdown("## Activity Insights")
 summary_cols = [
     "activity", "programme_type", "total_attendances", "unique_seniors", "number_of_sessions",
-    "avg_attendance_per_session", "returning_members", "retention_score", "male_attendances",
-    "unique_male_attendances", "male_pct", "unique_male_pct", "sample_note"
+    "avg_attendance_per_session", "returning_members", "retention_score",
+    "male_attendances", "female_attendances", "unique_male_attendances", "unique_female_attendances",
+    "male_pct", "female_pct", "unique_male_pct", "unique_female_pct", "sample_note"
 ]
 summary_cols = [c for c in summary_cols if c in activity_stats.columns]
 activity_summary_sorted = sortable_table(
@@ -1892,24 +1942,28 @@ if not recurring.empty:
 else:
     st.info("No recurring programmes found for this filter.")
 
-st.markdown("## Male Participation Analysis")
-male_cols = ["activity", "programme_type", "male_attendances", "unique_male_attendances", "male_pct", "unique_male_pct", "total_attendances", "unique_seniors", "sample_note"]
-male_cols = [c for c in male_cols if c in activity_stats.columns]
-male_display = activity_stats[male_cols].copy()
-male_sorted = sortable_table(
-    nice_columns(male_display),
-    "Male Attendances and Unique Male Attendances by Activity",
-    "male_activity",
-    default_sort="Male Attendances",
+st.markdown("## Gender Participation Analysis")
+st.caption("Total Attendances is shown first so it is clear that Male/Female Attendances are subsets of the same programme total. For example, 17 total attendances can display as 16 male + 1 female.")
+gender_cols = [
+    "activity", "programme_type", "total_attendances", "male_attendances", "female_attendances",
+    "unique_seniors", "unique_male_attendances", "unique_female_attendances",
+    "male_pct", "female_pct", "sample_note",
+]
+gender_cols = [c for c in gender_cols if c in activity_stats.columns]
+gender_display = activity_stats[gender_cols].copy()
+gender_sorted = sortable_table(
+    nice_columns(gender_display),
+    "Gender Attendances by Activity",
+    "gender_activity",
+    default_sort="Total Attendances",
     default_ascending=False,
-    help_text="Male Attendances counts all male attendance rows. Unique Male Attendances counts distinct male seniors per activity.",
+    help_text="Total Attendances counts all attended rows. Male/Female Attendances count only rows with that gender value.",
 )
 chart_left, chart_right = st.columns(2)
 with chart_left:
-    bar_chart(male_sorted.head(20), "Activity", "Male Attendances", "Male Attendances by Activity", color="Programme Type", key="male_att_chart")
+    bar_chart(gender_sorted.head(20), "Activity", "Male Attendances", "Male Attendances by Activity", color="Programme Type", key="male_att_chart")
 with chart_right:
-    male_unique_sorted = male_sorted.sort_values("Unique Male Attendances", ascending=False)
-    bar_chart(male_unique_sorted.head(20), "Activity", "Unique Male Attendances", "Unique Male Attendances by Activity", color="Programme Type", key="male_unique_chart")
+    bar_chart(gender_sorted.head(20), "Activity", "Female Attendances", "Female Attendances by Activity", color="Programme Type", key="female_att_chart")
 
 # Save only aggregate values. Unsupported recommendation outputs are intentionally removed.
 rec_df = pd.DataFrame()
