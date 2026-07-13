@@ -806,7 +806,7 @@ def show_stored_snapshot(snapshot):
 
 with st.sidebar:
     st.markdown("## Dashboard Controls")
-    st.markdown("Upload your attendance file, choose programme type, then generate the dashboard.")
+    st.markdown("Upload KPI workbooks, choose programme type, then generate the dashboard.")
 
     if "upload_reset_counter" not in st.session_state:
         st.session_state["upload_reset_counter"] = 0
@@ -823,23 +823,15 @@ with st.sidebar:
 
 upload_reset_counter = st.session_state.get("upload_reset_counter", 0)
 
-attendance_uploaded = st.file_uploader(
-    "Upload attendance / KPI Summary file(s)",
+uploaded_files = st.file_uploader(
+    "Upload KPI workbook(s)",
     type=["xlsx", "xls", "csv"],
     accept_multiple_files=True,
-    key=f"attendance_files_{upload_reset_counter}",
-    help="Use this for GLOW Bukit Batok style workbooks with Summary sheet and/or member attendance rows.",
+    key=f"kpi_files_{upload_reset_counter}",
+    help="Upload one or more attendance/KPI or programme-level files here. The app automatically detects the file type and assigns each row to its centre.",
 )
 
-programme_uploaded = st.file_uploader(
-    "Upload programme-level file(s) for other centres",
-    type=["xlsx", "xls", "csv"],
-    accept_multiple_files=True,
-    key=f"programme_files_{upload_reset_counter}",
-    help="Use this for files with Centre, Name of Event, Start Date, End Date, Event Domain, Is AAP?, Status, Target Attendees, and Total Sessions.",
-)
-
-if not attendance_uploaded and not programme_uploaded:
+if not uploaded_files:
     stored_snapshot = load_anonymized_snapshot()
     if stored_snapshot:
         show_stored_snapshot(stored_snapshot)
@@ -849,11 +841,11 @@ if not attendance_uploaded and not programme_uploaded:
         """
         <div class="section-card">
         <h3>How to use</h3>
-        <span class="success-pill">1. Upload attendance/KPI Summary files where available</span>
-        <span class="success-pill">2. Upload programme-level files for other centres</span>
-        <span class="success-pill">3. Map columns once in the app</span>
-        <span class="success-pill">4. Generate dashboard</span>
-        <p class="small-note">Attendance files calculate member KPIs. Programme files calculate programme/session/domain KPIs. The app will clearly show when a KPI cannot be calculated because member-level data is missing.</p>
+        <span class="success-pill">1. Upload one or more KPI workbooks in the single uploader above</span>
+        <span class="success-pill">2. The app detects attendance versus programme-level files automatically</span>
+        <span class="success-pill">3. Records are assigned to Bukit Batok, Nanyang, or the detected centre</span>
+        <span class="success-pill">4. Confirm mappings and generate the dashboard</span>
+        <p class="small-note">Use the Clear uploaded data button before loading a completely new dataset. Files for the same centre are combined automatically.</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -861,26 +853,15 @@ if not attendance_uploaded and not programme_uploaded:
     st.stop()
 
 with st.sidebar:
-    st.markdown("## Centre Detection")
-    attendance_centre_names = []
-    for i, file in enumerate(attendance_uploaded or []):
+    st.markdown("## Uploaded Files")
+    fallback_centre_names = []
+    for i, file in enumerate(uploaded_files):
         default_name = infer_centre_name(file.name)
-        attendance_centre_names.append(
+        fallback_centre_names.append(
             st.text_input(
                 f"Fallback centre if {file.name} has no Centre field",
                 value=default_name,
-                key=f"attendance_centre_name_{i}_{file.name}",
-            ).strip() or default_name
-        )
-
-    programme_centre_names = []
-    for i, file in enumerate(programme_uploaded or []):
-        default_name = infer_centre_name(file.name)
-        programme_centre_names.append(
-            st.text_input(
-                f"Fallback centre if {file.name} has no Centre field",
-                value=default_name,
-                key=f"programme_centre_name_{i}_{file.name}",
+                key=f"fallback_centre_name_{i}_{file.name}",
             ).strip() or default_name
         )
 
@@ -891,7 +872,36 @@ sheet_names_by_centre = {}
 programme_frames_raw = {}
 
 with st.spinner("Reading uploaded file(s)..."):
-    for file, fallback_centre in zip(attendance_uploaded or [], attendance_centre_names):
+    for file, fallback_centre in zip(uploaded_files, fallback_centre_names):
+        # Inspect the simple first-row structure first. Programme-level exports
+        # normally have event/session fields but no member-name field. Attendance
+        # workbooks are then read with the dedicated attendance-sheet parser.
+        try:
+            file.seek(0)
+            general_raw = read_general_uploaded_file(file)
+        except Exception:
+            general_raw = pd.DataFrame()
+
+        general_norm = normalize_columns(general_raw) if not general_raw.empty else pd.DataFrame()
+        programme_detected = detect_programme_columns(general_norm) if not general_norm.empty else {}
+        attendance_detected = detect_columns(general_norm) if not general_norm.empty else {}
+        is_programme_file = bool(
+            programme_detected.get("event_name")
+            and (programme_detected.get("total_sessions") or programme_detected.get("event_domain") or programme_detected.get("start_date"))
+            and not attendance_detected.get("member")
+        )
+
+        if is_programme_file:
+            prog_raw = general_raw.copy()
+            prog_raw["__uploaded_centre__"] = detect_centre_series(prog_raw, fallback_centre)
+            for detected_centre, centre_df in prog_raw.groupby("__uploaded_centre__", dropna=False):
+                detected_centre = canonical_centre_name(detected_centre) or canonical_centre_name(fallback_centre) or fallback_centre
+                centre_df = centre_df.copy()
+                centre_df["__uploaded_centre__"] = detected_centre
+                add_centre_frame(programme_frames_raw, detected_centre, centre_df)
+            continue
+
+        file.seek(0)
         df_one, sheet_names_one = read_uploaded_file(file)
         if df_one.empty:
             continue
@@ -909,9 +919,6 @@ with st.spinner("Reading uploaded file(s)..."):
             sheet_names_by_centre.setdefault(detected_centre, [])
             sheet_names_by_centre[detected_centre] = sorted(set(sheet_names_by_centre[detected_centre] + list(sheet_names_one)))
 
-        # A workbook Summary total can safely be assigned only when the workbook
-        # contains one centre. For mixed-centre workbooks, row-level dashboards
-        # remain separated but the combined Summary is not copied to each centre.
         if len(detected_centres) == 1:
             detected_centre = detected_centres[0]
             summary_kpis = df_one.attrs.get("summary_kpis", {}) if hasattr(df_one, "attrs") else {}
@@ -928,18 +935,6 @@ with st.spinner("Reading uploaded file(s)..."):
             for detected_centre in detected_centres:
                 centre_summary_kpis.setdefault(detected_centre, {})
                 centre_summary_tables.setdefault(detected_centre, pd.DataFrame())
-
-    for file, fallback_centre in zip(programme_uploaded or [], programme_centre_names):
-        prog_raw = read_general_uploaded_file(file)
-        if prog_raw.empty:
-            continue
-        prog_raw = prog_raw.copy()
-        prog_raw["__uploaded_centre__"] = detect_centre_series(prog_raw, fallback_centre)
-        for detected_centre, centre_df in prog_raw.groupby("__uploaded_centre__", dropna=False):
-            detected_centre = canonical_centre_name(detected_centre) or canonical_centre_name(fallback_centre) or fallback_centre
-            centre_df = centre_df.copy()
-            centre_df["__uploaded_centre__"] = detected_centre
-            add_centre_frame(programme_frames_raw, detected_centre, centre_df)
 
 all_centres = sorted(set(centre_frames.keys()) | set(programme_frames_raw.keys()))
 if not all_centres:
@@ -1057,10 +1052,7 @@ if activity_source_col and activity_source_col in df_preview.columns:
     )
 
 current_file_id = (
-    "|".join(
-        [f"attendance:{f.name}-{getattr(f, 'size', 0)}" for f in (attendance_uploaded or [])]
-        + [f"programme:{f.name}-{getattr(f, 'size', 0)}" for f in (programme_uploaded or [])]
-    )
+    "|".join([f"upload:{f.name}-{getattr(f, 'size', 0)}" for f in uploaded_files])
     + f"|view={selected_centre}"
 )
 if st.session_state.get("dashboard_file_id") != current_file_id:
