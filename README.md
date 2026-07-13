@@ -53,3 +53,12 @@ GLOW and SEEN labels are combined under their location for now. Row-level centre
 - The uploaded filename/fallback centre is now authoritative.
 - Generic `Bukit Batok` or `Nanyang` files remain generic and are never automatically upgraded to GLOW/SEEN.
 - Specific GLOW/SEEN labels are used only when the filename or fallback explicitly contains that label.
+
+## Member-status processing
+
+Before dashboard calculations, the app applies explicit status rules found in member names:
+
+- `Passed On` or `Deceased`: excluded from all dashboard analytics.
+- `Moved Out`: retained for historical attendance but reclassified as OB.
+- An on-screen audit reports the affected members and actions.
+- When these adjustments are present, KPI cards use the cleaned attendance rows instead of unadjusted Summary totals.

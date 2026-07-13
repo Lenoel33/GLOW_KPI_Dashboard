@@ -372,6 +372,51 @@ def clean_gender(value):
     return "Unknown"
 
 
+
+
+def apply_member_status_rules(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+    """Apply explicit member-status rules before any dashboard calculation.
+
+    Rules:
+    - Names containing Passed On or Deceased are excluded from analytics.
+    - Names containing Moved Out are retained but forced to OB.
+    The raw source workbook is never modified.
+    """
+    if frame is None or frame.empty or "member" not in frame.columns:
+        return frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(), {
+            "passed_on_excluded": 0,
+            "moved_out_reclassified": 0,
+            "passed_on_members": [],
+            "moved_out_members": [],
+        }
+
+    out = frame.copy()
+    names = out["member"].fillna("").astype(str).str.strip()
+    passed_mask = names.str.contains(r"\bpassed\s*on\b|\bdeceased\b", case=False, regex=True, na=False)
+    moved_mask = names.str.contains(r"\bmoved\s*out\b", case=False, regex=True, na=False)
+
+    passed_members = sorted(names.loc[passed_mask].replace("", pd.NA).dropna().unique().tolist())
+    moved_members = sorted(names.loc[moved_mask & ~passed_mask].replace("", pd.NA).dropna().unique().tolist())
+
+    out["member_status"] = "Active"
+    out.loc[moved_mask & ~passed_mask, "member_status"] = "Moved Out"
+
+    # A moved-out senior is treated as OB in every downstream table and chart.
+    if "ib_ob" not in out.columns:
+        out["ib_ob"] = pd.NA
+    out.loc[moved_mask & ~passed_mask, "ib_ob"] = "OB"
+
+    # Passed-on seniors are removed before attendance, KPI, preference and inactive calculations.
+    out = out.loc[~passed_mask].copy()
+
+    audit = {
+        "passed_on_excluded": len(passed_members),
+        "moved_out_reclassified": len(moved_members),
+        "passed_on_members": passed_members,
+        "moved_out_members": moved_members,
+    }
+    return out, audit
+
 def clean_ib_ob(value):
     """Normalise client type without treating blanks/invalid values as OB.
 
@@ -1158,6 +1203,10 @@ df = df.dropna(subset=["activity", "member"])
 df["activity"] = df["activity"].astype(str).str.strip()
 df["member"] = df["member"].astype(str).str.strip()
 
+# Apply explicit member-status rules once, before any KPI or detail calculation.
+# This guarantees that every dashboard section uses the same status-adjusted data.
+df, member_status_audit = apply_member_status_rules(df)
+
 if "date" in df.columns:
     df["date"] = df["date"].apply(standardize_date)
 
@@ -1268,7 +1317,14 @@ inactive_pct = inactive_count / total_unique_seniors if total_unique_seniors els
 # Headline KPI cards must follow the workbook Summary page.
 # Detail tables below still use cleaned attendance rows because the Summary page
 # contains totals only, not member-level attendance frequency.
-use_summary_kpis = isinstance(summary_kpis, dict) and bool(summary_kpis)
+status_adjustments_present = bool(
+    member_status_audit.get("passed_on_excluded", 0)
+    or member_status_audit.get("moved_out_reclassified", 0)
+)
+# A workbook Summary total cannot reflect dashboard-only status corrections.
+# When corrections were applied, use the cleaned rows as the KPI source so cards,
+# tables and charts remain internally consistent.
+use_summary_kpis = isinstance(summary_kpis, dict) and bool(summary_kpis) and not status_adjustments_present
 if use_summary_kpis:
     cleaned_snapshot = {
         "programmes": total_activities,
@@ -1477,6 +1533,24 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
     if not preferred_cols:
         return pd.DataFrame()
     return freq[preferred_cols].sort_values(["Attendances", "Senior Name"], ascending=[False, True]).reset_index(drop=True)
+
+# Transparent audit of explicit member-status adjustments.
+if member_status_audit.get("passed_on_excluded", 0) or member_status_audit.get("moved_out_reclassified", 0):
+    st.info(
+        f"Member-status adjustments applied: "
+        f"{member_status_audit.get('passed_on_excluded', 0)} passed-on/deceased senior(s) excluded; "
+        f"{member_status_audit.get('moved_out_reclassified', 0)} moved-out senior(s) reclassified to OB. "
+        "KPI cards use cleaned attendance rows for this upload because the workbook Summary does not include these dashboard corrections."
+    )
+    with st.expander("View member-status adjustment audit"):
+        passed = member_status_audit.get("passed_on_members", [])
+        moved = member_status_audit.get("moved_out_members", [])
+        if passed:
+            st.markdown("**Excluded — Passed On / Deceased**")
+            st.dataframe(pd.DataFrame({"Member": passed, "Action": "Excluded from all analytics"}), hide_index=True, use_container_width=True)
+        if moved:
+            st.markdown("**Reclassified — Moved Out**")
+            st.dataframe(pd.DataFrame({"Member": moved, "Action": "Reclassified to OB"}), hide_index=True, use_container_width=True)
 
 st.markdown("## Senior Attendance Frequency")
 st.caption("These tables count only cleaned `Attended` rows from real attendance-register sheets. Summary and Unique Seniors sheets are excluded from individual senior frequency counts.")
