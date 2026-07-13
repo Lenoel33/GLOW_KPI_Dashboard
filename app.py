@@ -709,12 +709,42 @@ def detect_centre_series(df: pd.DataFrame, fallback_centre: str) -> pd.Series:
     return result.map(reconcile_with_fallback).fillna(fallback)
 
 
+def _without_dataframe_attrs(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with metadata removed before pandas concatenation.
+
+    Some loaded frames carry DataFrame objects inside ``attrs`` (for example,
+    the parsed Summary table). Pandas 2.x/3.x compares attrs while concatenating;
+    comparing DataFrames produces an ambiguous truth-value error. Summary data is
+    stored separately, so row-level frames should not retain those attrs.
+    """
+    clean = frame.copy()
+    clean.attrs = {}
+    return clean
+
+
+def safe_concat_frames(frames, **kwargs) -> pd.DataFrame:
+    """Concatenate DataFrames after removing attrs that pandas cannot compare."""
+    clean_frames = [
+        _without_dataframe_attrs(frame)
+        for frame in list(frames)
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+    ]
+    if not clean_frames:
+        return pd.DataFrame()
+    result = pd.concat(clean_frames, **kwargs)
+    result.attrs = {}
+    return result
+
+
 def add_centre_frame(store: dict, centre: str, frame: pd.DataFrame) -> None:
     """Append data for a centre without overwriting an earlier uploaded file."""
+    clean_frame = _without_dataframe_attrs(frame)
     if centre in store and isinstance(store[centre], pd.DataFrame) and not store[centre].empty:
-        store[centre] = pd.concat([store[centre], frame], ignore_index=True, sort=False)
+        store[centre] = safe_concat_frames(
+            [store[centre], clean_frame], ignore_index=True, sort=False
+        )
     else:
-        store[centre] = frame.copy()
+        store[centre] = clean_frame
 
 
 def combine_summary_kpis(summary_items: dict) -> dict:
@@ -945,11 +975,11 @@ centre_options = ["All Centres"] + all_centres
 selected_centre = st.sidebar.selectbox("View KPI for centre", centre_options, index=0)
 
 if selected_centre == "All Centres":
-    df_all = pd.concat(centre_frames.values(), ignore_index=True, sort=False) if centre_frames else pd.DataFrame()
-    programme_raw_all = pd.concat(programme_frames_raw.values(), ignore_index=True, sort=False) if programme_frames_raw else pd.DataFrame()
+    df_all = safe_concat_frames(centre_frames.values(), ignore_index=True, sort=False)
+    programme_raw_all = safe_concat_frames(programme_frames_raw.values(), ignore_index=True, sort=False)
     summary_kpis = combine_summary_kpis(centre_summary_kpis)
     summary_tables = [t for t in centre_summary_tables.values() if isinstance(t, pd.DataFrame) and not t.empty]
-    summary_table = pd.concat(summary_tables, ignore_index=True, sort=False) if summary_tables else pd.DataFrame()
+    summary_table = safe_concat_frames(summary_tables, ignore_index=True, sort=False)
     sheet_names = [s for sheets in sheet_names_by_centre.values() for s in sheets]
 else:
     df_all = centre_frames.get(selected_centre, pd.DataFrame()).copy()
