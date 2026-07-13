@@ -1,5 +1,6 @@
 import sys
 import json
+import re
 from pathlib import Path
 from datetime import timedelta
 
@@ -653,6 +654,69 @@ def infer_centre_name(file_name: str) -> str:
     return stem or "Centre"
 
 
+def canonical_centre_name(value) -> str | None:
+    """Convert centre labels from uploaded rows into standard dashboard names."""
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "unknown", "unknown centre", "-"}:
+        return None
+    key = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
+
+    is_bb = any(token in key for token in ["bukit batok", " bb "]) or key in {"bb", "glow bb", "seen bb"}
+    is_nanyang = "nanyang" in key or key in {"ny", "glow ny", "seen ny"}
+    is_seen = "seen" in key
+    is_glow = "glow" in key
+
+    if is_bb:
+        return "SEEN Bukit Batok" if is_seen and not is_glow else "GLOW Bukit Batok"
+    if is_nanyang:
+        return "SEEN Nanyang" if is_seen and not is_glow else "GLOW Nanyang"
+    return text
+
+
+def detect_centre_series(df: pd.DataFrame, fallback_centre: str) -> pd.Series:
+    """Detect each row's centre, using explicit centre fields before file-name fallback."""
+    if df is None or df.empty:
+        return pd.Series(dtype="object")
+    candidates = []
+    for col in df.columns:
+        label = str(col).strip().lower().replace("_", " ")
+        if label in {"centre", "center", "centre name", "center name", "location", "site"}:
+            candidates.append(col)
+    result = pd.Series([None] * len(df), index=df.index, dtype="object")
+    for col in candidates:
+        values = df[col]
+        # Duplicate column names can return a DataFrame; use the first nonblank copy.
+        if isinstance(values, pd.DataFrame):
+            values = values.bfill(axis=1).iloc[:, 0]
+        normalized = values.map(canonical_centre_name)
+        result = result.where(result.notna(), normalized)
+    fallback = canonical_centre_name(fallback_centre) or fallback_centre
+
+    def reconcile_with_fallback(detected):
+        if detected is None or pd.isna(detected):
+            return fallback
+        detected_text = str(detected)
+        detected_location = "Bukit Batok" if "Bukit Batok" in detected_text else "Nanyang" if "Nanyang" in detected_text else None
+        fallback_location = "Bukit Batok" if "Bukit Batok" in fallback else "Nanyang" if "Nanyang" in fallback else None
+        # The workbook/file label decides GLOW vs SEEN when both labels refer to
+        # the same site. The row value still overrides it when it names another site.
+        if detected_location and fallback_location and detected_location == fallback_location:
+            return fallback
+        return detected_text
+
+    return result.map(reconcile_with_fallback).fillna(fallback)
+
+
+def add_centre_frame(store: dict, centre: str, frame: pd.DataFrame) -> None:
+    """Append data for a centre without overwriting an earlier uploaded file."""
+    if centre in store and isinstance(store[centre], pd.DataFrame) and not store[centre].empty:
+        store[centre] = pd.concat([store[centre], frame], ignore_index=True, sort=False)
+    else:
+        store[centre] = frame.copy()
+
+
 def combine_summary_kpis(summary_items: dict) -> dict:
     """Combine centre-level Summary KPIs for the All Centres view."""
     valid_items = {centre: item for centre, item in summary_items.items() if item}
@@ -797,13 +861,13 @@ if not attendance_uploaded and not programme_uploaded:
     st.stop()
 
 with st.sidebar:
-    st.markdown("## Centre Setup")
+    st.markdown("## Centre Detection")
     attendance_centre_names = []
     for i, file in enumerate(attendance_uploaded or []):
         default_name = infer_centre_name(file.name)
         attendance_centre_names.append(
             st.text_input(
-                f"Attendance/Summary centre for {file.name}",
+                f"Fallback centre if {file.name} has no Centre field",
                 value=default_name,
                 key=f"attendance_centre_name_{i}_{file.name}",
             ).strip() or default_name
@@ -814,7 +878,7 @@ with st.sidebar:
         default_name = infer_centre_name(file.name)
         programme_centre_names.append(
             st.text_input(
-                f"Programme file centre for {file.name}",
+                f"Fallback centre if {file.name} has no Centre field",
                 value=default_name,
                 key=f"programme_centre_name_{i}_{file.name}",
             ).strip() or default_name
@@ -827,31 +891,55 @@ sheet_names_by_centre = {}
 programme_frames_raw = {}
 
 with st.spinner("Reading uploaded file(s)..."):
-    for file, centre_name in zip(attendance_uploaded or [], attendance_centre_names):
+    for file, fallback_centre in zip(attendance_uploaded or [], attendance_centre_names):
         df_one, sheet_names_one = read_uploaded_file(file)
-        if not df_one.empty:
-            df_one = df_one.copy()
-            # Keep the selected/uploaded centre in a protected helper column.
-            # Some workbooks may already contain a blank/duplicate Centre column,
-            # so relying only on "centre" can leave the displayed Centre column empty.
-            df_one["__uploaded_centre__"] = centre_name
-            df_one["centre"] = centre_name
-            centre_frames[centre_name] = df_one
-        centre_summary_kpis[centre_name] = df_one.attrs.get("summary_kpis", {}) if hasattr(df_one, "attrs") else {}
-        summary_one = df_one.attrs.get("summary_table", pd.DataFrame()) if hasattr(df_one, "attrs") else pd.DataFrame()
-        if isinstance(summary_one, pd.DataFrame) and not summary_one.empty:
-            summary_one = summary_one.copy()
-            summary_one.insert(0, "Centre", centre_name)
-        centre_summary_tables[centre_name] = summary_one
-        sheet_names_by_centre[centre_name] = sheet_names_one
+        if df_one.empty:
+            continue
+        df_one = df_one.copy()
+        df_one["__uploaded_centre__"] = detect_centre_series(df_one, fallback_centre)
+        df_one["centre"] = df_one["__uploaded_centre__"]
+        detected_centres = sorted(df_one["__uploaded_centre__"].dropna().astype(str).unique().tolist())
 
-    for file, centre_name in zip(programme_uploaded or [], programme_centre_names):
+        for detected_centre, centre_df in df_one.groupby("__uploaded_centre__", dropna=False):
+            detected_centre = canonical_centre_name(detected_centre) or canonical_centre_name(fallback_centre) or fallback_centre
+            centre_df = centre_df.copy()
+            centre_df["__uploaded_centre__"] = detected_centre
+            centre_df["centre"] = detected_centre
+            add_centre_frame(centre_frames, detected_centre, centre_df)
+            sheet_names_by_centre.setdefault(detected_centre, [])
+            sheet_names_by_centre[detected_centre] = sorted(set(sheet_names_by_centre[detected_centre] + list(sheet_names_one)))
+
+        # A workbook Summary total can safely be assigned only when the workbook
+        # contains one centre. For mixed-centre workbooks, row-level dashboards
+        # remain separated but the combined Summary is not copied to each centre.
+        if len(detected_centres) == 1:
+            detected_centre = detected_centres[0]
+            summary_kpis = df_one.attrs.get("summary_kpis", {}) if hasattr(df_one, "attrs") else {}
+            centre_summary_kpis[detected_centre] = summary_kpis
+            summary_one = df_one.attrs.get("summary_table", pd.DataFrame()) if hasattr(df_one, "attrs") else pd.DataFrame()
+            if isinstance(summary_one, pd.DataFrame) and not summary_one.empty:
+                summary_one = summary_one.copy()
+                if "Centre" in summary_one.columns:
+                    summary_one["Centre"] = detected_centre
+                else:
+                    summary_one.insert(0, "Centre", detected_centre)
+            centre_summary_tables[detected_centre] = summary_one
+        else:
+            for detected_centre in detected_centres:
+                centre_summary_kpis.setdefault(detected_centre, {})
+                centre_summary_tables.setdefault(detected_centre, pd.DataFrame())
+
+    for file, fallback_centre in zip(programme_uploaded or [], programme_centre_names):
         prog_raw = read_general_uploaded_file(file)
-        if not prog_raw.empty:
-            prog_raw = prog_raw.copy()
-            # Keep the user-confirmed centre name even if the file has a Centre column.
-            prog_raw["__uploaded_centre__"] = centre_name
-            programme_frames_raw[centre_name] = prog_raw
+        if prog_raw.empty:
+            continue
+        prog_raw = prog_raw.copy()
+        prog_raw["__uploaded_centre__"] = detect_centre_series(prog_raw, fallback_centre)
+        for detected_centre, centre_df in prog_raw.groupby("__uploaded_centre__", dropna=False):
+            detected_centre = canonical_centre_name(detected_centre) or canonical_centre_name(fallback_centre) or fallback_centre
+            centre_df = centre_df.copy()
+            centre_df["__uploaded_centre__"] = detected_centre
+            add_centre_frame(programme_frames_raw, detected_centre, centre_df)
 
 all_centres = sorted(set(centre_frames.keys()) | set(programme_frames_raw.keys()))
 if not all_centres:
@@ -877,7 +965,7 @@ else:
 
 centre_kpi_table = make_centre_kpi_table(centre_summary_kpis)
 
-st.success(f"Loaded {len(centre_frames)} attendance/Summary file(s) and {len(programme_frames_raw)} programme-level file(s). Viewing: {selected_centre}. Read {len(sheet_names)} attendance sheet(s).")
+st.success(f"Automatically assigned data to {len(all_centres)} centre dashboard(s). Viewing: {selected_centre}. Read {len(sheet_names)} attendance sheet(s).")
 
 # Programme-level mapping. This lets other centre files with fields such as Centre,
 # End Date, Event Domain, Is AAP?, Name of Event, Target Attendees, and Total Sessions

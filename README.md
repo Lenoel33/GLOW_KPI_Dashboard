@@ -20,3 +20,12 @@ Upload the files inside this folder to GitHub. Do not upload the ZIP itself.
 - IB/OB and gender views are separated clearly into tabs.
 - One-time vs recurring is derived only from workbook attendance dates/sessions.
 - Individual senior profile cards show only workbook-supported fields.
+
+
+## v35 Automatic Centre Assignment
+- Reads Centre/Center/Centre Name/Location/Site fields and automatically separates rows into the correct centre dashboard.
+- Recognises GLOW Bukit Batok, SEEN Bukit Batok, GLOW Nanyang, and SEEN Nanyang aliases.
+- Uses the uploaded filename/fallback centre only when a row has no centre, or to resolve the GLOW/SEEN label at the same location.
+- A mixed-centre workbook is split by row so Bukit Batok and Nanyang data cannot mix.
+- Multiple files for the same centre are appended rather than overwriting each other.
+- Summary totals are assigned only when a workbook contains one detected centre, preventing a combined Summary row from being copied into multiple centre dashboards.
