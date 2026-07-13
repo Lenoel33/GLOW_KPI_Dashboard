@@ -29,3 +29,27 @@ Upload the files inside this folder to GitHub. Do not upload the ZIP itself.
 - A mixed-centre workbook is split by row so Bukit Batok and Nanyang data cannot mix.
 - Multiple files for the same centre are appended rather than overwriting each other.
 - Summary totals are assigned only when a workbook contains one detected centre, preventing a combined Summary row from being copied into multiple centre dashboards.
+
+## v38 centre display correction
+- Explicit row-level Centre/Location/Site values now take priority over the uploaded filename.
+- Combined Bukit Batok workbooks can separate GLOW Bukit Batok and Tzu Chi SEEN @ Bukit Batok records.
+- File/fallback centre labels are used only when a row has no usable centre value.
+- Senior attendance-frequency tables preserve the detected service centre instead of overwriting every row with the selected location.
+
+## v39 centre grouping
+Centre reporting is intentionally simplified to two location dashboards only:
+- Bukit Batok
+- Nanyang
+
+GLOW and SEEN labels are combined under their location for now. Row-level centre fields remain the preferred source, with the filename used only as a fallback.
+
+
+## v40 centre-label precedence
+- Preserves explicit GLOW Bukit Batok, Tzu Chi SEEN @ Bukit Batok, GLOW Nanyang, and Tzu Chi SEEN @ Nanyang labels.
+- Uses generic Bukit Batok or Nanyang only when neither row data nor filename specifies GLOW/SEEN.
+- Row-level centre values take priority over filename inference.
+
+## v41 centre assignment correction
+- The uploaded filename/fallback centre is now authoritative.
+- Generic `Bukit Batok` or `Nanyang` files remain generic and are never automatically upgraded to GLOW/SEEN.
+- Specific GLOW/SEEN labels are used only when the filename or fallback explicitly contains that label.

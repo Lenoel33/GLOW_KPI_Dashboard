@@ -640,73 +640,90 @@ def save_anonymized_snapshot(kpis, type_stats, gender_unique, activity_stats, re
 
 
 def infer_centre_name(file_name: str) -> str:
-    """Guess the centre name from the uploaded workbook name."""
-    name = str(file_name).lower()
-    if "bukit" in name or "(bb" in name or " bb" in name or "glow (bb" in name:
-        if "seen" in name:
-            return "SEEN Bukit Batok"
-        return "GLOW Bukit Batok"
-    if "seen" in name and "nanyang" in name:
-        return "SEEN Nanyang"
-    if "glow" in name and "nanyang" in name:
-        return "GLOW Nanyang"
+    """Infer the most specific centre label available from the filename.
+
+    Preserve GLOW/SEEN when stated. Use the broad location only when the
+    filename identifies Bukit Batok or Nanyang without a service label.
+    """
+    name = re.sub(r"[^a-z0-9]+", " ", str(file_name).lower()).strip()
+    is_glow = "glow" in name
+    is_seen = "seen" in name
+    is_bb = "bukit batok" in name or " bb " in f" {name} " or name.endswith(" bb") or "glow bb" in name or "seen bb" in name
+    is_ny = "nanyang" in name or " ny " in f" {name} " or name.endswith(" ny") or "glow ny" in name or "seen ny" in name
+
+    if is_bb:
+        if is_glow:
+            return "GLOW Bukit Batok"
+        if is_seen:
+            return "Tzu Chi SEEN @ Bukit Batok"
+        return "Bukit Batok"
+    if is_ny:
+        if is_glow:
+            return "GLOW Nanyang"
+        if is_seen:
+            return "Tzu Chi SEEN @ Nanyang"
+        return "Nanyang"
+
     stem = Path(str(file_name)).stem.replace("_", " ").replace("-", " ").strip()
     return stem or "Centre"
 
 
 def canonical_centre_name(value) -> str | None:
-    """Convert centre labels from uploaded rows into standard dashboard names."""
+    """Return the most specific supported centre label present in the data.
+
+    Explicit GLOW/SEEN labels are preserved. Generic Bukit Batok or Nanyang is
+    used only when the source does not identify the service.
+    """
     if value is None or pd.isna(value):
         return None
     text = str(value).strip()
     if not text or text.lower() in {"nan", "none", "unknown", "unknown centre", "-"}:
         return None
     key = re.sub(r"[^a-z0-9]+", " ", text.lower()).strip()
-
-    is_bb = any(token in key for token in ["bukit batok", " bb "]) or key in {"bb", "glow bb", "seen bb"}
-    is_nanyang = "nanyang" in key or key in {"ny", "glow ny", "seen ny"}
-    is_seen = "seen" in key
     is_glow = "glow" in key
+    is_seen = "seen" in key
+    is_bb = "bukit batok" in key or key in {"bb", "glow bb", "seen bb"}
+    is_ny = "nanyang" in key or key in {"ny", "glow ny", "seen ny"}
 
     if is_bb:
-        return "SEEN Bukit Batok" if is_seen and not is_glow else "GLOW Bukit Batok"
-    if is_nanyang:
-        return "SEEN Nanyang" if is_seen and not is_glow else "GLOW Nanyang"
+        if is_glow:
+            return "GLOW Bukit Batok"
+        if is_seen:
+            return "Tzu Chi SEEN @ Bukit Batok"
+        return "Bukit Batok"
+    if is_ny:
+        if is_glow:
+            return "GLOW Nanyang"
+        if is_seen:
+            return "Tzu Chi SEEN @ Nanyang"
+        return "Nanyang"
     return text
 
 
 def detect_centre_series(df: pd.DataFrame, fallback_centre: str) -> pd.Series:
-    """Detect each row's centre, using explicit centre fields before file-name fallback."""
+    """Assign a centre without inventing a more specific service label.
+
+    The filename/user fallback is authoritative for the uploaded file. If it is
+    only ``Bukit Batok`` or ``Nanyang``, every row remains at that broad location
+    even when an imported helper/summary sheet contains an old GLOW/SEEN value.
+    A specific GLOW or SEEN label is used only when the filename/fallback itself
+    supplies that specificity. This is deliberately conservative for accuracy.
+    """
     if df is None or df.empty:
         return pd.Series(dtype="object")
-    candidates = []
-    for col in df.columns:
-        label = str(col).strip().lower().replace("_", " ")
-        if label in {"centre", "center", "centre name", "center name", "location", "site"}:
-            candidates.append(col)
-    result = pd.Series([None] * len(df), index=df.index, dtype="object")
-    for col in candidates:
-        values = df[col]
-        # Duplicate column names can return a DataFrame; use the first nonblank copy.
-        if isinstance(values, pd.DataFrame):
-            values = values.bfill(axis=1).iloc[:, 0]
-        normalized = values.map(canonical_centre_name)
-        result = result.where(result.notna(), normalized)
-    fallback = canonical_centre_name(fallback_centre) or fallback_centre
 
-    def reconcile_with_fallback(detected):
-        if detected is None or pd.isna(detected):
-            return fallback
-        detected_text = str(detected)
-        detected_location = "Bukit Batok" if "Bukit Batok" in detected_text else "Nanyang" if "Nanyang" in detected_text else None
-        fallback_location = "Bukit Batok" if "Bukit Batok" in fallback else "Nanyang" if "Nanyang" in fallback else None
-        # The workbook/file label decides GLOW vs SEEN when both labels refer to
-        # the same site. The row value still overrides it when it names another site.
-        if detected_location and fallback_location and detected_location == fallback_location:
-            return fallback
-        return detected_text
+    fallback = canonical_centre_name(fallback_centre) or str(fallback_centre).strip()
+    fallback_key = str(fallback).lower()
+    fallback_is_specific = "glow" in fallback_key or "seen" in fallback_key
 
-    return result.map(reconcile_with_fallback).fillna(fallback)
+    # A generic file-level label must stay generic. Do not silently upgrade it
+    # to GLOW/SEEN using values carried over from helper or Unique Seniors sheets.
+    if fallback in {"Bukit Batok", "Nanyang"} or not fallback_is_specific:
+        return pd.Series([fallback] * len(df), index=df.index, dtype="object")
+
+    # For a specifically named file, keep that exact centre consistently. This
+    # avoids rows being split because of blank, stale, or inconsistent cell data.
+    return pd.Series([fallback] * len(df), index=df.index, dtype="object")
 
 
 def _without_dataframe_attrs(frame: pd.DataFrame) -> pd.DataFrame:
@@ -873,7 +890,7 @@ if not uploaded_files:
         <h3>How to use</h3>
         <span class="success-pill">1. Upload one or more KPI workbooks in the single uploader above</span>
         <span class="success-pill">2. The app detects attendance versus programme-level files automatically</span>
-        <span class="success-pill">3. Records are assigned to Bukit Batok, Nanyang, or the detected centre</span>
+        <span class="success-pill">3. Records keep GLOW/SEEN labels when available; otherwise Bukit Batok or Nanyang is used</span>
         <span class="success-pill">4. Confirm mappings and generate the dashboard</span>
         <p class="small-note">Use the Clear uploaded data button before loading a completely new dataset. Files for the same centre are combined automatically.</p>
         </div>
@@ -1001,7 +1018,7 @@ if not programme_raw_all.empty:
     prog_detected = detect_programme_columns(prog_preview)
     prog_cols = prog_preview.columns.tolist()
     with st.expander("Programme File Mapping", expanded=True):
-        st.markdown("Map these columns for SEEN Bukit Batok, SEEN Nanyang, GLOW Nanyang, or other programme-level files.")
+        st.markdown("Map these columns for Bukit Batok, Nanyang, or other programme-level files.")
         p_left, p_right = st.columns(2)
         with p_left:
             p_centre = st.selectbox("Centre column", [None] + prog_cols, index=prog_cols.index(prog_detected["centre"]) + 1 if prog_detected["centre"] in prog_cols else 0)
@@ -1117,10 +1134,10 @@ if missing:
 rename_map = {source: target for target, source in final_map.items() if source}
 df = original.rename(columns=rename_map)
 
-# Uploaded GLOW (BB) workbooks can contain an internal Centre column with
-# old labels such as "Tzu Chi SEEN @ Bukit Batok". The dashboard centre should
-# reflect the centre selected during upload, so overwrite the display centre
-# with the protected uploaded-centre helper column where available.
+# Preserve the centre detected from each attendance row. The protected
+# __uploaded_centre__ field is created during ingestion from the workbook's
+# explicit Centre/Location/Site value and falls back to the file label only
+# when that row has no centre information.
 if df.columns.duplicated().any():
     collapsed = {}
     for col in dict.fromkeys(list(df.columns)):
@@ -1132,6 +1149,8 @@ if df.columns.duplicated().any():
     df = pd.DataFrame(collapsed)
 if "__uploaded_centre__" in df.columns:
     df["centre"] = df["__uploaded_centre__"].astype(str).str.strip()
+elif "centre" in df.columns:
+    df["centre"] = df["centre"].map(canonical_centre_name)
 elif selected_centre != "All Centres":
     df["centre"] = selected_centre
 
@@ -1382,13 +1401,17 @@ def make_senior_attendance_frequency(source_df: pd.DataFrame, status_value: str,
     temp = _collapse_duplicate_columns(temp).copy()
 
     if "__uploaded_centre__" in temp.columns:
-        # Always use the centre chosen at upload time. Do not display older/raw
-        # Centre values from the workbook such as "Tzu Chi SEEN @ Bukit Batok"
-        # when this upload is being treated as GLOW Bukit Batok.
+        # Use the most specific row-level centre detected during ingestion.
         temp["centre"] = temp["__uploaded_centre__"].astype(str).str.strip()
+    elif "centre" in temp.columns:
+        temp["centre"] = temp["centre"].map(canonical_centre_name)
 
     if fallback_centre and fallback_centre != "All Centres":
-        temp["centre"] = fallback_centre
+        if "centre" not in temp.columns:
+            temp["centre"] = fallback_centre
+        else:
+            missing_centre = temp["centre"].isna() | temp["centre"].astype(str).str.strip().isin(["", "nan", "None"])
+            temp.loc[missing_centre, "centre"] = fallback_centre
 
     required_cols = {"member", "ib_ob_clean"}
     if not required_cols.issubset(set(temp.columns)):
