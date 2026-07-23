@@ -1,10 +1,14 @@
-GITHUB UPLOAD CHECKLIST
+UPLOAD CHECKLIST
+================
 
-[ ] 1. Extract the ZIP.
-[ ] 2. In GitHub, rename the existing app.py to centre_dashboard.py.
-[ ] 3. Confirm centre_dashboard.py still contains the old dashboard code.
-[ ] 4. Upload all five runtime files from this package to the repository root.
-[ ] 5. Commit to the main branch.
-[ ] 6. Confirm app.py and centre_dashboard.py both appear in the repository.
-[ ] 7. Open or reboot the Streamlit app.
-[ ] 8. Confirm the top taskbar shows all three dashboard sections.
+[ ] Keep the existing app.py in GitHub.
+[ ] Keep the existing utils.py and requirements.txt.
+[ ] Extract this ZIP before uploading.
+[ ] Upload main.py to the repository root.
+[ ] Upload cst_project_taskbar.py to the repository root.
+[ ] Upload cst_kpi_core.py to the repository root.
+[ ] Upload CST_KPI_Data_Template.xlsx to the repository root.
+[ ] Deploy a Streamlit app using main.py as the Main file path.
+[ ] Confirm Centre Dashboard still displays the original dashboard.
+[ ] Confirm Project APRIL opens.
+[ ] Confirm Project L'Harmoni opens.
