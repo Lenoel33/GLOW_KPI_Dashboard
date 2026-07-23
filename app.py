@@ -162,6 +162,537 @@ def render_kpi_cards(cards):
         )
     st.markdown('<div class="kpi-grid">' + ''.join(html_cards) + '</div>', unsafe_allow_html=True)
 
+
+# -----------------------------------------------------------------------------
+# Top taskbar and CST project KPI pages
+# -----------------------------------------------------------------------------
+# The original centre dashboard below is intentionally left unchanged. The
+# taskbar only stops execution early when a project page is selected.
+
+APRIL_CENTRES = [
+    "GLOW Bukit Batok",
+    "Tzu Chi SEEN @ Bukit Batok",
+    "GLOW Nanyang",
+    "Tzu Chi SEEN @ Nanyang",
+]
+LHARMONI_CENTRES = ["GLOW Bukit Batok", "GLOW Nanyang"]
+PROJECT_TEMPLATE_PATH = APP_DIR / "CST_Project_KPI_Input_Template.xlsx"
+
+APRIL_TARGETS = {
+    "Seniors onboarded": 1000,
+    "Risk validation rate": 0.80,
+    "Complete MMSE/GDS/SPPB sets (annual)": 100,
+    "Unique seniors tracked (3 years)": 300,
+    "AAC clients reached (annual)": 1000,
+    "Volunteers reached (annual)": 100,
+    "Caregivers reached (annual)": 200,
+}
+
+LHARMONI_TARGETS = {
+    "Total participating seniors": 1000,
+    "GLOW Bukit Batok participants": 500,
+    "GLOW Nanyang participants": 500,
+    "Improved or maintained outcome rate": 0.60,
+    "Complete MMSE/GDS/SPPB sets (annual)": 100,
+    "Unique seniors tracked (3 years)": 300,
+}
+
+
+def _project_centre_name(value):
+    """Map project-input centre labels to the exact reporting names."""
+    if pd.isna(value):
+        return None
+    text = re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    if not text:
+        return None
+    is_glow = "glow" in text
+    is_seen = "seen" in text
+    is_bb = "bukit batok" in text or text in {"bb", "glow bb", "seen bb"}
+    is_ny = "nanyang" in text or text in {"ny", "glow ny", "seen ny"}
+    if is_bb and is_glow:
+        return "GLOW Bukit Batok"
+    if is_bb and is_seen:
+        return "Tzu Chi SEEN @ Bukit Batok"
+    if is_ny and is_glow:
+        return "GLOW Nanyang"
+    if is_ny and is_seen:
+        return "Tzu Chi SEEN @ Nanyang"
+    return str(value).strip()
+
+
+def _normalise_project_columns(frame):
+    out = frame.copy()
+    out.columns = [
+        re.sub(r"[^a-z0-9]+", "_", str(c).strip().lower()).strip("_")
+        for c in out.columns
+    ]
+    return out
+
+
+def _read_project_sheet(uploaded_file, preferred_sheet):
+    """Read one named project sheet from the controlled workbook."""
+    uploaded_file.seek(0)
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        return pd.read_csv(uploaded_file)
+    sheets = pd.read_excel(uploaded_file, sheet_name=None, engine="openpyxl")
+    lookup = {str(name).strip().lower(): name for name in sheets}
+    wanted = preferred_sheet.strip().lower()
+    if wanted in lookup:
+        return sheets[lookup[wanted]]
+    # Accept the first sheet containing the project name, but never silently
+    # use an unrelated sheet.
+    project_word = "april" if "april" in wanted else "lharmoni"
+    match = next((original for key, original in lookup.items() if project_word in key.replace("'", "")), None)
+    if match is None:
+        raise ValueError(f"Required sheet '{preferred_sheet}' was not found.")
+    return sheets[match]
+
+
+def _number_series(frame, column):
+    if column not in frame.columns:
+        return pd.Series(0.0, index=frame.index)
+    return pd.to_numeric(frame[column], errors="coerce").fillna(0)
+
+
+def _format_pct(value):
+    return "Data unavailable" if value is None or pd.isna(value) else f"{float(value):.1%}"
+
+
+def _metric_with_progress(label, actual, target, percentage=False):
+    if actual is None or pd.isna(actual):
+        st.metric(label, "Data unavailable", f"Target: {target:.0%}" if percentage else f"Target: {target:,}")
+        return
+    display = f"{float(actual):.1%}" if percentage else f"{int(actual):,}"
+    target_display = f"{target:.0%}" if percentage else f"{target:,}"
+    st.metric(label, display, f"Target: {target_display}")
+    ratio = (float(actual) / float(target)) if target else 0
+    st.progress(min(max(ratio, 0.0), 1.0))
+
+
+def _project_template_download():
+    if PROJECT_TEMPLATE_PATH.exists():
+        st.download_button(
+            "⬇️ Download controlled project KPI template",
+            data=PROJECT_TEMPLATE_PATH.read_bytes(),
+            file_name=PROJECT_TEMPLATE_PATH.name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+    else:
+        st.warning("The project KPI template is missing from the repository root.")
+
+
+def _project_page_header(title, subtitle):
+    st.markdown(
+        f"""
+        <div class="hero-card">
+            <h1>{html_lib.escape(title)}</h1>
+            <p>{html_lib.escape(subtitle)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _target_reference_table(targets, project):
+    rows = []
+    for indicator, target in targets.items():
+        rows.append({
+            "Project": project,
+            "Official KPI": indicator,
+            "Target": f"{target:.0%}" if isinstance(target, float) and target < 1 else f"{int(target):,}",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def _validate_common_project_rows(frame, allowed_centres, required_columns):
+    errors = []
+    warnings = []
+    missing = [c for c in required_columns if c not in frame.columns]
+    if missing:
+        errors.append("Missing required columns: " + ", ".join(missing))
+        return errors, warnings
+
+    frame["centre"] = frame["centre"].apply(_project_centre_name)
+    invalid_centres = sorted(set(frame["centre"].dropna()) - set(allowed_centres))
+    if invalid_centres:
+        errors.append("Invalid or non-applicable centre value(s): " + ", ".join(invalid_centres))
+
+    frame["reporting_date"] = pd.to_datetime(frame["reporting_date"], errors="coerce")
+    if frame["reporting_date"].isna().any():
+        errors.append("One or more Reporting_Date values are blank or invalid.")
+
+    if frame.duplicated(subset=["reporting_date", "centre"], keep=False).any():
+        errors.append("Each centre may appear only once for the same Reporting_Date.")
+
+    for evidence_col in ["source_reference", "prepared_by", "reviewed_by"]:
+        if evidence_col in frame.columns and frame[evidence_col].fillna("").astype(str).str.strip().eq("").any():
+            warnings.append(f"Some rows are missing {evidence_col.replace('_', ' ').title()}.")
+    return errors, warnings
+
+
+def _report_validation(errors, warnings):
+    if errors:
+        st.error("Official reporting checks failed:\n\n- " + "\n- ".join(errors))
+    if warnings:
+        st.warning("Review before submission:\n\n- " + "\n- ".join(warnings))
+    if not errors and not warnings:
+        st.success("All automated structural checks passed. Figures still require authorised human reconciliation before AIC submission.")
+
+
+def render_april_project_page():
+    _project_page_header(
+        "Project APRIL KPI Dashboard",
+        "Compares current APRIL progress across all four centres against the approved project-wide CST indicators.",
+    )
+    st.info(
+        "APRIL applies to GLOW Bukit Batok, Tzu Chi SEEN @ Bukit Batok, GLOW Nanyang and Tzu Chi SEEN @ Nanyang. "
+        "The application does not assign individual onboarding targets to each centre, so centre figures are shown as contributions to the project-wide target—not as centre pass/fail targets."
+    )
+
+    with st.expander("Official APRIL targets", expanded=True):
+        _target_reference_table(APRIL_TARGETS, "APRIL")
+
+    left, right = st.columns([1, 1])
+    with left:
+        _project_template_download()
+    with right:
+        st.caption("Upload the completed template. The dashboard will not estimate missing values from normal attendance data.")
+
+    uploaded = st.file_uploader(
+        "Upload APRIL current KPI data",
+        type=["xlsx", "xls", "csv"],
+        key="april_project_upload",
+    )
+    if uploaded is None:
+        render_kpi_cards([
+            ("Seniors onboarded", "Target 1,000"),
+            ("Risk validation", "Target 80%"),
+            ("Annual assessment sets", "Target 100"),
+            ("3-year tracked seniors", "Target 300"),
+            ("AAC clients / year", "Target 1,000"),
+            ("Volunteers / year", "Target 100"),
+            ("Caregivers / year", "Target 200"),
+        ])
+        st.caption("Actual figures will appear after a controlled APRIL input file is uploaded.")
+        return
+
+    try:
+        raw = _read_project_sheet(uploaded, "APRIL_Current")
+    except Exception as exc:
+        st.error(str(exc))
+        return
+    frame = _normalise_project_columns(raw).dropna(how="all").copy()
+    required = [
+        "reporting_date", "centre", "seniors_onboarded", "risk_flags_reviewed",
+        "risk_flags_validated", "complete_assessment_sets_annual",
+        "unique_tracked_seniors_3_year", "aac_clients_reached_annual",
+        "volunteers_reached_annual", "caregivers_reached_annual",
+        "source_reference", "prepared_by", "reviewed_by",
+    ]
+    errors, warnings = _validate_common_project_rows(frame, APRIL_CENTRES, required)
+    if errors and any(e.startswith("Missing required columns") for e in errors):
+        _report_validation(errors, warnings)
+        return
+
+    numeric_cols = [
+        "seniors_onboarded", "risk_flags_reviewed", "risk_flags_validated",
+        "complete_assessment_sets_annual", "unique_tracked_seniors_3_year",
+        "aac_clients_reached_annual", "volunteers_reached_annual",
+        "caregivers_reached_annual",
+    ]
+    for col in numeric_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        if frame[col].isna().any():
+            errors.append(f"{col.replace('_', ' ').title()} contains blank or non-numeric values.")
+        if (frame[col].fillna(0) < 0).any():
+            errors.append(f"{col.replace('_', ' ').title()} cannot be negative.")
+    if (frame["risk_flags_validated"].fillna(0) > frame["risk_flags_reviewed"].fillna(0)).any():
+        errors.append("Risk Flags Validated cannot exceed Risk Flags Reviewed.")
+
+    valid_dates = sorted(frame["reporting_date"].dropna().dt.date.unique(), reverse=True)
+    if not valid_dates:
+        _report_validation(errors, warnings)
+        return
+    selected_date = st.selectbox("Reporting date", valid_dates, key="april_reporting_date")
+    current = frame[frame["reporting_date"].dt.date == selected_date].copy()
+    current = current[current["centre"].isin(APRIL_CENTRES)].copy()
+
+    totals = {c: float(current[c].fillna(0).sum()) for c in numeric_cols}
+    reviewed = totals["risk_flags_reviewed"]
+    validation_rate = totals["risk_flags_validated"] / reviewed if reviewed > 0 else None
+
+    st.markdown("## Project-wide progress")
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        _metric_with_progress("Seniors onboarded", totals["seniors_onboarded"], 1000)
+    with c2:
+        _metric_with_progress("Risk validation rate", validation_rate, 0.80, percentage=True)
+    with c3:
+        _metric_with_progress("Annual assessment sets", totals["complete_assessment_sets_annual"], 100)
+    with c4:
+        _metric_with_progress("3-year tracked seniors", totals["unique_tracked_seniors_3_year"], 300)
+    c5, c6, c7 = st.columns(3)
+    with c5:
+        _metric_with_progress("AAC clients reached", totals["aac_clients_reached_annual"], 1000)
+    with c6:
+        _metric_with_progress("Volunteers reached", totals["volunteers_reached_annual"], 100)
+    with c7:
+        _metric_with_progress("Caregivers reached", totals["caregivers_reached_annual"], 200)
+
+    display = current[[
+        "centre", "seniors_onboarded", "risk_flags_reviewed", "risk_flags_validated",
+        "complete_assessment_sets_annual", "unique_tracked_seniors_3_year",
+        "aac_clients_reached_annual", "volunteers_reached_annual",
+        "caregivers_reached_annual", "source_reference", "prepared_by", "reviewed_by",
+    ]].copy()
+    display["risk_validation_rate"] = np.where(
+        display["risk_flags_reviewed"] > 0,
+        display["risk_flags_validated"] / display["risk_flags_reviewed"],
+        np.nan,
+    )
+    display = display.rename(columns={
+        "centre": "Centre",
+        "seniors_onboarded": "Seniors Onboarded",
+        "risk_flags_reviewed": "Risk Flags Reviewed",
+        "risk_flags_validated": "Risk Flags Validated",
+        "risk_validation_rate": "Risk Validation Rate",
+        "complete_assessment_sets_annual": "Complete Assessment Sets (Annual)",
+        "unique_tracked_seniors_3_year": "Unique Tracked Seniors (3 Years)",
+        "aac_clients_reached_annual": "AAC Clients Reached (Annual)",
+        "volunteers_reached_annual": "Volunteers Reached (Annual)",
+        "caregivers_reached_annual": "Caregivers Reached (Annual)",
+        "source_reference": "Source Reference",
+        "prepared_by": "Prepared By",
+        "reviewed_by": "Reviewed By",
+    })
+    st.markdown("## Centre contribution comparison")
+    st.dataframe(
+        display.style.format({"Risk Validation Rate": "{:.1%}"}, na_rep="Data unavailable"),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart = current.groupby("centre", as_index=False)["seniors_onboarded"].sum()
+    if not chart.empty:
+        fig = px.bar(chart, x="centre", y="seniors_onboarded", text_auto=True, title="APRIL seniors onboarded by centre")
+        fig.update_layout(xaxis_title=None, yaxis_title="Seniors", xaxis_tickangle=-20)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "Accuracy note: project totals are calculated by adding the centre summary values in the uploaded file. "
+        "Before AIC submission, confirm that unique seniors are not duplicated across centres and reconcile totals to the underlying person-level records."
+    )
+    _report_validation(errors, warnings)
+
+
+
+def render_lharmoni_project_page():
+    _project_page_header(
+        "Project L’Harmoni KPI Dashboard",
+        "Compares GLOW Bukit Batok and GLOW Nanyang against the assigned L’Harmoni participation and outcome indicators.",
+    )
+    st.info(
+        "L’Harmoni is restricted to GLOW Bukit Batok and GLOW Nanyang in this dashboard. "
+        "SEEN records are rejected rather than displayed as zero or automatically reassigned."
+    )
+
+    with st.expander("Official L’Harmoni targets", expanded=True):
+        _target_reference_table(LHARMONI_TARGETS, "L’Harmoni")
+
+    left, right = st.columns([1, 1])
+    with left:
+        _project_template_download()
+    with right:
+        st.caption("Upload the completed template. Outcome figures must use an approved one-year classification rule.")
+
+    uploaded = st.file_uploader(
+        "Upload L’Harmoni current KPI data",
+        type=["xlsx", "xls", "csv"],
+        key="lharmoni_project_upload",
+    )
+    if uploaded is None:
+        render_kpi_cards([
+            ("Total participants", "Target 1,000"),
+            ("GLOW Bukit Batok", "Target 500"),
+            ("GLOW Nanyang", "Target 500"),
+            ("Improved / maintained", "Target 60%"),
+            ("Annual assessment sets", "Target 100"),
+            ("3-year tracked seniors", "Target 300"),
+        ])
+        st.caption("Actual figures will appear after a controlled L’Harmoni input file is uploaded.")
+        return
+
+    try:
+        raw = _read_project_sheet(uploaded, "LHarmoni_Current")
+    except Exception as exc:
+        st.error(str(exc))
+        return
+    frame = _normalise_project_columns(raw).dropna(how="all").copy()
+    required = [
+        "reporting_date", "centre", "participating_seniors", "outcome_eligible_seniors",
+        "improved_or_maintained_seniors", "complete_assessment_sets_annual",
+        "unique_tracked_seniors_3_year", "outcome_rule_version", "source_reference",
+        "prepared_by", "reviewed_by",
+    ]
+    errors, warnings = _validate_common_project_rows(frame, LHARMONI_CENTRES, required)
+    if errors and any(e.startswith("Missing required columns") for e in errors):
+        _report_validation(errors, warnings)
+        return
+
+    numeric_cols = [
+        "participating_seniors", "outcome_eligible_seniors",
+        "improved_or_maintained_seniors", "complete_assessment_sets_annual",
+        "unique_tracked_seniors_3_year",
+    ]
+    for col in numeric_cols:
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        if frame[col].isna().any():
+            errors.append(f"{col.replace('_', ' ').title()} contains blank or non-numeric values.")
+        if (frame[col].fillna(0) < 0).any():
+            errors.append(f"{col.replace('_', ' ').title()} cannot be negative.")
+    if (frame["improved_or_maintained_seniors"].fillna(0) > frame["outcome_eligible_seniors"].fillna(0)).any():
+        errors.append("Improved or Maintained Seniors cannot exceed Outcome Eligible Seniors.")
+    if (frame["outcome_eligible_seniors"].fillna(0) > frame["participating_seniors"].fillna(0)).any():
+        errors.append("Outcome Eligible Seniors cannot exceed Participating Seniors.")
+    if frame["outcome_rule_version"].fillna("").astype(str).str.strip().eq("").any():
+        errors.append("Every L’Harmoni row requires an approved Outcome Rule Version.")
+
+    valid_dates = sorted(frame["reporting_date"].dropna().dt.date.unique(), reverse=True)
+    if not valid_dates:
+        _report_validation(errors, warnings)
+        return
+    selected_date = st.selectbox("Reporting date", valid_dates, key="lharmoni_reporting_date")
+    current = frame[frame["reporting_date"].dt.date == selected_date].copy()
+    current = current[current["centre"].isin(LHARMONI_CENTRES)].copy()
+
+    totals = {c: float(current[c].fillna(0).sum()) for c in numeric_cols}
+    eligible = totals["outcome_eligible_seniors"]
+    outcome_rate = totals["improved_or_maintained_seniors"] / eligible if eligible > 0 else None
+    centre_participants = current.groupby("centre")["participating_seniors"].sum().to_dict()
+
+    st.markdown("## Project-wide progress")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _metric_with_progress("Total participating seniors", totals["participating_seniors"], 1000)
+    with c2:
+        _metric_with_progress("Improved or maintained", outcome_rate, 0.60, percentage=True)
+    with c3:
+        _metric_with_progress("Annual assessment sets", totals["complete_assessment_sets_annual"], 100)
+    c4, c5, c6 = st.columns(3)
+    with c4:
+        _metric_with_progress("GLOW Bukit Batok participants", centre_participants.get("GLOW Bukit Batok", 0), 500)
+    with c5:
+        _metric_with_progress("GLOW Nanyang participants", centre_participants.get("GLOW Nanyang", 0), 500)
+    with c6:
+        _metric_with_progress("3-year tracked seniors", totals["unique_tracked_seniors_3_year"], 300)
+
+    display = current[[
+        "centre", "participating_seniors", "outcome_eligible_seniors",
+        "improved_or_maintained_seniors", "complete_assessment_sets_annual",
+        "unique_tracked_seniors_3_year", "outcome_rule_version", "source_reference",
+        "prepared_by", "reviewed_by",
+    ]].copy()
+    display["outcome_rate"] = np.where(
+        display["outcome_eligible_seniors"] > 0,
+        display["improved_or_maintained_seniors"] / display["outcome_eligible_seniors"],
+        np.nan,
+    )
+    display["centre_target"] = display["centre"].map({"GLOW Bukit Batok": 500, "GLOW Nanyang": 500})
+    display["participant_progress"] = np.where(
+        display["centre_target"] > 0,
+        display["participating_seniors"] / display["centre_target"],
+        np.nan,
+    )
+    display = display.rename(columns={
+        "centre": "Centre",
+        "participating_seniors": "Participating Seniors",
+        "centre_target": "Centre Target",
+        "participant_progress": "Participant Progress",
+        "outcome_eligible_seniors": "Outcome Eligible Seniors",
+        "improved_or_maintained_seniors": "Improved or Maintained Seniors",
+        "outcome_rate": "Outcome Rate",
+        "complete_assessment_sets_annual": "Complete Assessment Sets (Annual)",
+        "unique_tracked_seniors_3_year": "Unique Tracked Seniors (3 Years)",
+        "outcome_rule_version": "Outcome Rule Version",
+        "source_reference": "Source Reference",
+        "prepared_by": "Prepared By",
+        "reviewed_by": "Reviewed By",
+    })
+    st.markdown("## GLOW centre comparison")
+    st.dataframe(
+        display.style.format({
+            "Participant Progress": "{:.1%}",
+            "Outcome Rate": "{:.1%}",
+        }, na_rep="Data unavailable"),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    chart = current.groupby("centre", as_index=False)["participating_seniors"].sum()
+    if not chart.empty:
+        chart["target"] = chart["centre"].map({"GLOW Bukit Batok": 500, "GLOW Nanyang": 500})
+        long_chart = chart.melt(id_vars="centre", value_vars=["participating_seniors", "target"], var_name="Measure", value_name="Seniors")
+        long_chart["Measure"] = long_chart["Measure"].map({"participating_seniors": "Actual", "target": "Target"})
+        fig = px.bar(long_chart, x="centre", y="Seniors", color="Measure", barmode="group", text_auto=True, title="L’Harmoni participants: actual versus target")
+        fig.update_layout(xaxis_title=None, xaxis_tickangle=-15)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "The 60% rate uses Improved or Maintained Seniors divided by Outcome Eligible Seniors. "
+        "New participants who have not reached the approved one-year follow-up window should not be placed in the denominator."
+    )
+    _report_validation(errors, warnings)
+
+
+# Add only the top navigation required by the user. No original centre-dashboard
+# section below is renamed, wrapped, or otherwise modified.
+st.markdown(
+    """
+    <style>
+    div[data-testid="stRadio"] > div[role="radiogroup"] {
+        display: flex;
+        gap: 0.7rem;
+        background: #FFFFFF;
+        border: 1px solid #E9D6B3;
+        border-radius: 18px;
+        padding: 0.55rem;
+        width: fit-content;
+        box-shadow: 0 5px 18px rgba(13, 43, 69, 0.07);
+        margin-bottom: 1rem;
+    }
+    div[data-testid="stRadio"] > div[role="radiogroup"] label {
+        background: #F7F1E7;
+        border: 1px solid #E9D6B3;
+        border-radius: 14px;
+        padding: 0.65rem 1rem;
+    }
+    div[data-testid="stRadio"] > div[role="radiogroup"] label:has(input:checked) {
+        background: #0D2B45;
+        color: #FFFFFF;
+        border-color: #0D2B45;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+st.markdown("### DASHBOARD PAGES")
+_dashboard_page = st.radio(
+    "Dashboard Pages",
+    ["Centre Dashboard", "Project APRIL", "Project L’Harmoni"],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="dashboard_page_taskbar",
+)
+
+if _dashboard_page == "Project APRIL":
+    render_april_project_page()
+    st.stop()
+elif _dashboard_page == "Project L’Harmoni":
+    render_lharmoni_project_page()
+    st.stop()
+
 st.markdown(
     """
     <div class="hero-card">
