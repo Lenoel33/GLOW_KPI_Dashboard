@@ -646,45 +646,47 @@ def render_lharmoni_project_page():
     _report_validation(errors, warnings)
 
 
-# Add only the top navigation required by the user. No original centre-dashboard
-# section below is renamed, wrapped, or otherwise modified.
+# Dashboard navigation is placed in the existing Streamlit sidebar so the
+# original centre dashboard layout remains unchanged. The built-in multipage
+# navigation is hidden because APRIL and L’Harmoni are rendered by this app.
 st.markdown(
     """
     <style>
-    div[data-testid="stRadio"] > div[role="radiogroup"] {
+    [data-testid="stSidebarNav"] { display: none !important; }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] {
         display: flex;
-        gap: 0.7rem;
-        background: #FFFFFF;
-        border: 1px solid #E9D6B3;
-        border-radius: 18px;
-        padding: 0.55rem;
-        width: fit-content;
-        box-shadow: 0 5px 18px rgba(13, 43, 69, 0.07);
-        margin-bottom: 1rem;
+        flex-direction: column;
+        gap: 0.35rem;
+        width: 100%;
     }
-    div[data-testid="stRadio"] > div[role="radiogroup"] label {
-        background: #F7F1E7;
-        border: 1px solid #E9D6B3;
-        border-radius: 14px;
-        padding: 0.65rem 1rem;
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] label {
+        width: 100%;
+        border-radius: 10px;
+        padding: 0.55rem 0.75rem;
+        margin: 0;
     }
-    div[data-testid="stRadio"] > div[role="radiogroup"] label:has(input:checked) {
-        background: #0D2B45;
-        color: #FFFFFF;
-        border-color: #0D2B45;
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] label:hover {
+        background: rgba(13, 43, 69, 0.08);
+    }
+    section[data-testid="stSidebar"] div[data-testid="stRadio"] > div[role="radiogroup"] label:has(input:checked) {
+        background: rgba(13, 43, 69, 0.14);
+        color: #0D2B45;
+        font-weight: 800;
     }
     </style>
     """,
     unsafe_allow_html=True,
 )
-st.markdown("### DASHBOARD PAGES")
-_dashboard_page = st.radio(
-    "Dashboard Pages",
-    ["Centre Dashboard", "Project APRIL", "Project L’Harmoni"],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="dashboard_page_taskbar",
-)
+
+with st.sidebar:
+    st.markdown("## Dashboard Pages")
+    _dashboard_page = st.radio(
+        "Dashboard Pages",
+        ["Centre Dashboard", "Project APRIL", "Project L’Harmoni"],
+        label_visibility="collapsed",
+        key="dashboard_page_sidebar",
+    )
+    st.divider()
 
 if _dashboard_page == "Project APRIL":
     render_april_project_page()

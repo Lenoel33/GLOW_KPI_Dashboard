@@ -1,64 +1,23 @@
-# GLOW KPI Dashboard - v18 Summary KPI Fix
+# GLOW KPI Dashboard — Sidebar Project Navigation
 
-Fixes the KPI Overview issue where Summary values with thousands separators were parsed incorrectly.
+This build preserves the original centre KPI dashboard and adds two project views inside the existing Streamlit sidebar:
 
-Key fix:
-- Summary sheet values like `1,017` now display as `1,017`, not `1`.
-- KPI Overview remains locked to the Summary sheet `OVERALL TOTAL:` row.
-- Charts and detailed tables can still use attendance/programme rows.
+- Centre Dashboard
+- Project APRIL — all four centres
+- Project L’Harmoni — GLOW Bukit Batok and GLOW Nanyang only
 
-Upload the files inside this folder to GitHub. Do not upload the ZIP itself.
+## GitHub upload
 
-## v24 consistency fix
-- KPI Overview IB/OB/Unique Member counts now use the same cleaned `Attended` rows as the Senior Attendance Frequency tables.
-- IB/OB attendance-frequency rows are grouped by senior name so tab counts tally with KPI cards.
-- Inactive KPI uses the highest recorded AAP count per senior and the same member-level logic as the inactive list.
+Upload the extracted files to the repository root and replace the existing `app.py`, `utils.py`, `.streamlit/config.toml`, and related files.
 
-## v31 Accuracy Cleanup
-- Removed unsupported or inferred analytics that cannot be verified from the KPI Excel, including programme category charts, living-alone analysis, and recommendation sections.
-- Programme preferences now use only real attendance rows from valid attendance sheets.
-- IB/OB and gender views are separated clearly into tabs.
-- One-time vs recurring is derived only from workbook attendance dates/sessions.
-- Individual senior profile cards show only workbook-supported fields.
+The Streamlit entrypoint remains:
 
+```
+app.py
+```
 
-## v35 Automatic Centre Assignment
-- Reads Centre/Center/Centre Name/Location/Site fields and automatically separates rows into the correct centre dashboard.
-- Recognises GLOW Bukit Batok, SEEN Bukit Batok, GLOW Nanyang, and SEEN Nanyang aliases.
-- Uses the uploaded filename/fallback centre only when a row has no centre, or to resolve the GLOW/SEEN label at the same location.
-- A mixed-centre workbook is split by row so Bukit Batok and Nanyang data cannot mix.
-- Multiple files for the same centre are appended rather than overwriting each other.
-- Summary totals are assigned only when a workbook contains one detected centre, preventing a combined Summary row from being copied into multiple centre dashboards.
+The package intentionally contains no `pages` folder. If an old `pages` folder remains in GitHub, delete it to avoid keeping obsolete routes. The included Streamlit configuration also hides automatic multipage navigation so only the custom sidebar navigation is shown.
 
-## v38 centre display correction
-- Explicit row-level Centre/Location/Site values now take priority over the uploaded filename.
-- Combined Bukit Batok workbooks can separate GLOW Bukit Batok and Tzu Chi SEEN @ Bukit Batok records.
-- File/fallback centre labels are used only when a row has no usable centre value.
-- Senior attendance-frequency tables preserve the detected service centre instead of overwriting every row with the selected location.
+## Accuracy
 
-## v39 centre grouping
-Centre reporting is intentionally simplified to two location dashboards only:
-- Bukit Batok
-- Nanyang
-
-GLOW and SEEN labels are combined under their location for now. Row-level centre fields remain the preferred source, with the filename used only as a fallback.
-
-
-## v40 centre-label precedence
-- Preserves explicit GLOW Bukit Batok, Tzu Chi SEEN @ Bukit Batok, GLOW Nanyang, and Tzu Chi SEEN @ Nanyang labels.
-- Uses generic Bukit Batok or Nanyang only when neither row data nor filename specifies GLOW/SEEN.
-- Row-level centre values take priority over filename inference.
-
-## v41 centre assignment correction
-- The uploaded filename/fallback centre is now authoritative.
-- Generic `Bukit Batok` or `Nanyang` files remain generic and are never automatically upgraded to GLOW/SEEN.
-- Specific GLOW/SEEN labels are used only when the filename or fallback explicitly contains that label.
-
-## Member-status processing
-
-Before dashboard calculations, the app applies explicit status rules found in member names:
-
-- `Passed On` or `Deceased`: excluded from all dashboard analytics.
-- `Moved Out`: retained for historical attendance but reclassified as OB.
-- An on-screen audit reports the affected members and actions.
-- When these adjustments are present, KPI cards use the cleaned attendance rows instead of unadjusted Summary totals.
+The APRIL and L’Harmoni pages require the controlled Excel input template. Missing project data is not estimated from the operational attendance workbook.
