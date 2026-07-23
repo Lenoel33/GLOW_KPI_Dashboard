@@ -1,7 +1,16 @@
-1. Extract this ZIP.
-2. Upload all extracted contents to the ROOT of the GitHub repository.
-3. Replace app.py when GitHub asks.
-4. Ensure the .streamlit/config.toml file is committed.
-5. Delete the old GitHub pages folder if it still exists.
-6. Keep Streamlit Main file path set to app.py.
-7. Reboot the Streamlit app.
+GITHUB UPLOAD CHECKLIST
+
+[ ] Extract GLOW_KPI_Dashboard_AIC_COMPLETE.zip
+[ ] Upload the extracted contents, not the ZIP itself
+[ ] Replace app.py in the repository root
+[ ] Upload project_kpi_aic.py to the repository root
+[ ] Upload AIC_Project_KPI_Input_Template.xlsx
+[ ] Upload AIC_Project_KPI_Mock_Verification.xlsx
+[ ] Upload .streamlit/config.toml
+[ ] Delete the old pages folder, if present
+[ ] Delete old cst_project_taskbar.py / cst_kpi_core.py / main.py files from previous attempts if they are no longer used
+[ ] Keep Streamlit main file path as app.py
+[ ] Commit to the main branch
+[ ] Reboot the Streamlit app
+[ ] Confirm sidebar shows Centre Dashboard, Project APRIL, Project L’Harmoni
+[ ] Run the included mock workbook and compare with Expected Results
