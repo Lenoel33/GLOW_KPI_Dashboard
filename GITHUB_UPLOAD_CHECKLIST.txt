@@ -1,0 +1,10 @@
+[ ] I extracted the ZIP before uploading
+[ ] cst_kpi_core.py appears in the GitHub repository root
+[ ] a pages folder appears in GitHub
+[ ] pages/2_CST_Project_KPIs.py appears inside that folder
+[ ] a templates folder appears in GitHub
+[ ] templates/CST_KPI_Data_Template.xlsx appears inside that folder
+[ ] I committed to the same branch used by Streamlit Cloud
+[ ] Streamlit redeployed after the commit
+[ ] The sidebar shows CST Project KPIs
+[ ] The assigned KPI target table is visible before data upload
