@@ -1796,6 +1796,135 @@ def render_april_page(template_path: Path | None = None) -> None:
     _audit_tabs(result)
 
 
+def analyse_lharmoni_combined_tables(tables: list[SourceTable]) -> dict[str, Any]:
+    """Build the combined GLOW Bukit Batok/Nanyang operational KPI dataset.
+
+    This function intentionally accepts only SourceTable objects produced by
+    read_project_files. Keeping the conversion here prevents UI code from
+    guessing whether a table uses `.data`, `.frame`, dictionaries or tuples.
+    """
+    frames: list[pd.DataFrame] = []
+    conversion_errors: list[str] = []
+
+    for index, table in enumerate(tables):
+        if not isinstance(table, SourceTable):
+            conversion_errors.append(
+                f"Table {index + 1} had unsupported type {type(table).__name__} and was skipped."
+            )
+            continue
+        if not isinstance(table.frame, pd.DataFrame):
+            conversion_errors.append(
+                f"{table.source_file} / {table.source_sheet}: parsed content was not a DataFrame."
+            )
+            continue
+        frame = table.frame.copy(deep=False)
+        frame = frame.copy()
+        frame["_source_file"] = str(table.source_file)
+        frame["_source_sheet"] = str(table.source_sheet)
+        frames.append(frame)
+
+    if not frames:
+        return {"data": pd.DataFrame(), "errors": conversion_errors}
+
+    df = pd.concat(frames, ignore_index=True, sort=False)
+
+    def normalise_header(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
+
+    normalised_columns = [(normalise_header(column), column) for column in df.columns]
+
+    def find_column(*names: str) -> Any:
+        wanted = [normalise_header(name) for name in names]
+        for wanted_name in wanted:
+            for normalised, original in normalised_columns:
+                if normalised == wanted_name:
+                    return original
+        for wanted_name in wanted:
+            for normalised, original in normalised_columns:
+                if wanted_name and (wanted_name in normalised or normalised in wanted_name):
+                    return original
+        return None
+
+    exact_centres_col = next(
+        (column for normalised, column in normalised_columns if normalised == "centres"),
+        None,
+    )
+    centre_col = exact_centres_col or find_column(
+        "centre", "centers", "center", "service centres", "service centre",
+        "service centers", "service center", "centre name", "center name",
+        "location", "site",
+    )
+    status_col = find_column("status", "attendance status", "attended")
+    name_col = find_column("display name", "member name", "participant name", "senior name", "name")
+    id_col = find_column("nric", "senior id", "client id", "member id", "participant id", "person id")
+    activity_col = find_column("activity name", "programme name", "program name", "activity", "event name")
+    session_col = find_column("session detail", "session date", "activity date", "programme date", "event date", "date")
+    gender_col = find_column("gender", "sex")
+    client_col = find_column("is client", "client status", "client type")
+    boundary_col = find_column("within boundary", "boundary")
+    cfs_col = find_column("cfs from", "cfs")
+    domain_col = find_column("aap domain", "domain")
+
+    if status_col is not None:
+        status_text = df[status_col].astype("string").str.strip().str.casefold()
+        attended_mask = status_text.isin(["attended", "present", "yes", "y", "1", "true"])
+        if bool(attended_mask.any()):
+            df = df.loc[attended_mask].copy()
+
+    # Organisation rule: Name is the participant identifier for L'Harmoni.
+    identity_col = name_col if name_col is not None else id_col
+    if identity_col is not None:
+        identity_text = df[identity_col].astype("string").str.strip().str.replace(r"\s+", " ", regex=True)
+        invalid = identity_text.str.casefold().isin(["", "nan", "none", "null", "<na>"])
+        identity_text = identity_text.mask(invalid)
+        df["_senior_identity"] = identity_text.str.casefold()
+        df["_senior_display_name"] = identity_text
+    else:
+        df["_senior_identity"] = pd.Series(pd.NA, index=df.index, dtype="string")
+        df["_senior_display_name"] = pd.Series(pd.NA, index=df.index, dtype="string")
+
+    # Organisation rule: read the exact Centres field where available.
+    # Contains Bukit Batok -> GLOW Bukit Batok; contains Nanyang -> GLOW Nanyang.
+    df["_lh_centre"] = pd.Series(pd.NA, index=df.index, dtype="string")
+    ambiguous_count = 0
+    unassigned_count = len(df)
+    if centre_col is not None:
+        centre_text = df[centre_col].astype("string").str.strip().str.replace(r"\s+", " ", regex=True).str.casefold()
+        bb_mask = centre_text.str.contains("bukit batok", regex=False, na=False)
+        ny_mask = centre_text.str.contains("nanyang", regex=False, na=False)
+        ambiguous_mask = bb_mask & ny_mask
+        df.loc[bb_mask & ~ambiguous_mask, "_lh_centre"] = "GLOW Bukit Batok"
+        df.loc[ny_mask & ~ambiguous_mask, "_lh_centre"] = "GLOW Nanyang"
+        ambiguous_count = int(ambiguous_mask.sum())
+        unassigned_count = int(df["_lh_centre"].isna().sum())
+
+    total_attendances = int(len(df))
+    total_unique = int(df["_senior_identity"].dropna().nunique()) if df["_senior_identity"].notna().any() else None
+
+    centre_rows: list[dict[str, Any]] = []
+    for centre in ["GLOW Bukit Batok", "GLOW Nanyang"]:
+        part = df.loc[df["_lh_centre"] == centre]
+        participants = int(part["_senior_identity"].dropna().nunique()) if not part.empty and part["_senior_identity"].notna().any() else None
+        centre_rows.append({"Centre": centre, "Attendances": int(len(part)), "Participants": participants})
+    centre_df = pd.DataFrame(centre_rows)
+
+    return {
+        "data": df,
+        "errors": conversion_errors,
+        "columns": {
+            "centre": centre_col, "status": status_col, "name": name_col, "id": id_col,
+            "activity": activity_col, "session": session_col, "gender": gender_col,
+            "client": client_col, "boundary": boundary_col, "cfs": cfs_col, "domain": domain_col,
+        },
+        "total_attendances": total_attendances,
+        "total_unique": total_unique,
+        "unique_tracked": total_unique,
+        "centre_summary": centre_df,
+        "ambiguous_count": ambiguous_count,
+        "unassigned_count": unassigned_count,
+    }
+
+
 def render_lharmoni_page(template_path: Path | None = None) -> None:
     _inject_metric_card_css()
     _header("Project L’Harmoni KPI Dashboard", "GLOW Bukit Batok and GLOW Nanyang only. Official participation, one-year physical/cognitive outcome, annual assessment and implementation measures.")
@@ -1810,311 +1939,60 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         st.caption("Upload structured source files. The official 60% KPI is withheld unless the one-year timing rule is explicitly approved below.")
         return
     tables, file_errors = read_project_files(files)
-    reporting_year, project_start_year = _year_and_start_controls(tables, "lharmoni")
-
-    st.markdown("### Official one-year outcome controls")
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        min_days = st.number_input("Minimum days after enrolment", min_value=1, max_value=730, value=335, step=1, key="lh_min_days")
-    with cc2:
-        max_days = st.number_input("Maximum days after enrolment", min_value=1, max_value=730, value=395, step=1, key="lh_max_days")
-    with cc3:
-        cutoff = st.date_input("Data cut-off date", value=date.today(), key="lh_cutoff")
-    timing_approved = st.checkbox("The one-year follow-up window above has been approved for official reporting.", value=False, key="lh_timing_approved")
-    score_rule_approved = st.checkbox("Use raw SPPB/MMSE score direction (post ≥ pre = improved/maintained) as an approved outcome rule when explicit domain classifications are absent.", value=False, key="lh_score_rule_approved")
-    st.caption("Without approval, the dashboard shows evidence and coverage but does not publish an official 60% outcome result.")
-
-    result = analyse_lharmoni(
-        tables, reporting_year, project_start_year, int(min_days), int(max_days), timing_approved,
-        score_rule_approved, pd.Timestamp(cutoff),
-    )
-    summary = result.centre_summary.copy()
-    bb = summary.loc[summary["centre"] == "GLOW Bukit Batok", "participating_seniors"].dropna()
-    ny = summary.loc[summary["centre"] == "GLOW Nanyang", "participating_seniors"].dropna()
-
-    st.markdown("## Official numerical indicators")
-    c1, c2, c3 = st.columns(3)
-    with c1: _metric_card("Total participating seniors", result.totals.get("participating_seniors"), 1000)
-    with c2: _metric_card("GLOW Bukit Batok participants", float(bb.iloc[0]) if not bb.empty else None, 500)
-    with c3: _metric_card("GLOW Nanyang participants", float(ny.iloc[0]) if not ny.empty else None, 500)
-    c4, c5, c6 = st.columns(3)
-    with c4: _metric_card("Official improve/maintain rate", result.totals.get("official_outcome_rate"), 0.60, True, "Successful physical/cognitive outcomes ÷ all tracked seniors due")
-    with c5: _metric_card("Complete assessment sets", result.totals.get("complete_assessment_sets_annual"), 100, note=f"{reporting_year}")
-    with c6: _metric_card("Unique seniors tracked", result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
-
-    st.markdown("### Current versus target bar charts")
-    _progress_comparison_chart([
-        {"label": "Total participating seniors", "value": result.totals.get("participating_seniors"), "target": 1000},
-        {"label": "GLOW Bukit Batok participants", "value": float(bb.iloc[0]) if not bb.empty else None, "target": 500},
-        {"label": "GLOW Nanyang participants", "value": float(ny.iloc[0]) if not ny.empty else None, "target": 500},
-        {"label": "Improve / maintain rate", "value": result.totals.get("official_outcome_rate"), "target": 0.60, "percentage": True},
-        {"label": "Complete assessment sets", "value": result.totals.get("complete_assessment_sets_annual"), "target": 100},
-        {"label": "Unique seniors tracked", "value": result.totals.get("unique_tracked_seniors_3_year"), "target": 300},
-    ], "L’Harmoni current versus official targets", "lharmoni_official_progress")
-
-    st.markdown("## One-year outcome completeness")
-    o1, o2, o3 = st.columns(3)
-    with o1: _metric_card("Tracked seniors due", result.totals.get("tracked_seniors_due"))
-    with o2: _metric_card("Valid one-year outcomes", result.totals.get("outcome_eligible_seniors"))
-    with o3: _metric_card("Improved / maintained", result.totals.get("improved_or_maintained_seniors"))
-    o4, _, _ = st.columns(3)
-    with o4: _metric_card("Assessment coverage", result.totals.get("one_year_assessment_coverage"), percentage=True)
-    st.caption("Completed-assessment outcome rate (supporting only): " + _fmt_pct(result.totals.get("completed_assessment_outcome_rate")))
-
-    st.markdown("## GLOW centre comparison")
-    display = summary.copy()
-    display["official_outcome_rate"] = np.where(
-        timing_approved & (pd.to_numeric(display.get("tracked_seniors_due"), errors="coerce") > 0),
-        pd.to_numeric(display.get("improved_or_maintained_seniors"), errors="coerce") / pd.to_numeric(display.get("tracked_seniors_due"), errors="coerce"),
-        np.nan,
-    )
-    display = display.rename(columns={
-        "centre": "Centre", "participating_seniors": "Participants", "tracked_seniors_due": "One-Year Due",
-        "outcome_eligible_seniors": "Valid Outcomes", "improved_or_maintained_seniors": "Improved/Maintained",
-        "official_outcome_rate": "Official Outcome Rate", "mmse_completed_annual": "MMSE", "gds_completed_annual": "GDS",
-        "sppb_completed_annual": "SPPB", "complete_assessment_sets_annual": "Complete Sets", "unique_tracked_seniors_3_year": "3-Year Tracked",
-    })
-    st.dataframe(display.style.format({"Official Outcome Rate": "{:.1%}"}, na_rep="Data unavailable"), use_container_width=True, hide_index=True)
-
-    outcome_breakdown = result.assessment_summary.attrs.get("outcome_breakdown", pd.DataFrame())
-    if isinstance(outcome_breakdown, pd.DataFrame) and not outcome_breakdown.empty:
-        st.markdown("## Approved physical and cognitive outcome breakdown")
-        st.dataframe(outcome_breakdown, use_container_width=True, hide_index=True)
-        fig = px.bar(outcome_breakdown, x="Centre", y="Seniors", color="Outcome", facet_col="Domain", barmode="group", title="Approved one-year outcomes by domain")
-        st.plotly_chart(fig, use_container_width=True)
-
-    st.markdown("## Annual assessment coverage")
-    a1, a2, a3 = st.columns(3)
-    with a1: _metric_card("MMSE completed", result.totals.get("mmse_completed_annual"))
-    with a2: _metric_card("GDS completed", result.totals.get("gds_completed_annual"))
-    with a3: _metric_card("SPPB completed", result.totals.get("sppb_completed_annual"))
-    a4, _, _ = st.columns(3)
-    with a4: _metric_card("All three completed", result.totals.get("complete_assessment_sets_annual"), 100)
-
-    st.markdown("## Programme fidelity and continuity monitoring")
-    sup_rows = []
-    for key, value in result.supplementary.items():
-        label = key.replace("_", " ").title()
-        if isinstance(value, float) and 0 <= value <= 1 and "rate" in key:
-            shown = f"{value:.1%}"
-        elif isinstance(value, float):
-            shown = f"{value:,.2f}"
-        elif value is None:
-            shown = "Data unavailable"
-        else:
-            shown = f"{int(value):,}"
-        sup_rows.append({"Monitoring Measure": label, "Current Value": shown})
-    if sup_rows:
-        st.dataframe(pd.DataFrame(sup_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info("No source-backed track, session, transition or ICCP escalation fields were detected.")
-
-    st.markdown("## Implementation milestones")
-    st.dataframe(result.milestone_summary, use_container_width=True, hide_index=True)
-    _messages(result, file_errors)
-    _audit_tabs(result)
-
-# -----------------------------------------------------------------------------
-# L'Harmoni is the reporting name for the combined GLOW Bukit Batok and
-# GLOW Nanyang KPI view. It is not treated as a separate project dataset.
-# -----------------------------------------------------------------------------
-def render_lharmoni_page(template_path: Path | None = None) -> None:
-    _inject_metric_card_css()
-    _header(
-        "L’Harmoni — Combined GLOW Centre KPIs",
-        "Combined reporting view for GLOW Bukit Batok and GLOW Nanyang. L’Harmoni is a reporting name, not a separate project.",
-    )
-    st.info(
-        "Upload attendance/export files for the two GLOW centres. Total participants and unique seniors tracked are "
-        "calculated from cleaned participant names. Centre totals are read from the Centres field: values containing "
-        "'Bukit Batok' are assigned to GLOW Bukit Batok, while values containing 'Nanyang' are assigned to GLOW Nanyang."
-    )
-
-    files = _upload_files(
-        "Upload GLOW Bukit Batok and GLOW Nanyang source file(s)",
-        "lharmoni_combined_glow_upload",
-    )
-    if not files:
-        st.caption("Upload Excel, CSV or other supported structured attendance files to build the combined L’Harmoni view.")
-        return
-
-    tables, file_errors = read_project_files(files)
     if not tables:
         st.error("No readable tables were found in the uploaded files.")
+        for message in file_errors:
+            st.warning(message)
         return
 
-    frames = []
-    for table in tables:
-        # SourceTable stores the parsed DataFrame in ``frame``.  Earlier builds
-        # incorrectly referenced ``data``, causing an AttributeError after upload.
-        # The fallback keeps this compatible with any older table-like objects.
-        source_frame = getattr(table, "frame", None)
-        if source_frame is None:
-            source_frame = getattr(table, "data", None)
-        if not isinstance(source_frame, pd.DataFrame):
-            file_errors.append(
-                f"{getattr(table, 'source_file', 'Uploaded file')}: readable table data was not available."
-            )
-            continue
-
-        frame = source_frame.copy()
-        frame["_source_file"] = getattr(table, "source_file", "Uploaded file")
-        frame["_source_sheet"] = getattr(table, "source_sheet", "Unknown sheet")
-        frames.append(frame)
-
-    if not frames:
-        st.error("No usable table data were found in the uploaded files.")
-        if file_errors:
-            for message in file_errors:
-                st.warning(message)
+    combined = analyse_lharmoni_combined_tables(tables)
+    file_errors = list(file_errors) + list(combined.get("errors", []))
+    df = combined.get("data")
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.error("No usable attendance rows were found in the uploaded files.")
+        for message in file_errors:
+            st.warning(message)
         return
-    df = pd.concat(frames, ignore_index=True, sort=False)
 
-    def _normalise_header(value: object) -> str:
-        return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
+    columns = combined["columns"]
+    centre_col = columns["centre"]
+    activity_col = columns["activity"]
+    session_col = columns["session"]
+    gender_col = columns["gender"]
+    client_col = columns["client"]
+    boundary_col = columns["boundary"]
+    cfs_col = columns["cfs"]
+    domain_col = columns["domain"]
 
-    norm = {_normalise_header(c): c for c in df.columns}
-
-    def find(*names: str):
-        wanted = [_normalise_header(n) for n in names]
-        for n in wanted:
-            for k, c in norm.items():
-                if k == n:
-                    return c
-        for n in wanted:
-            for k, c in norm.items():
-                if n in k or k in n:
-                    return c
-        return None
-
-    # Organisation-specific centre logic:
-    # 1. Prefer the exact field named "Centres" whenever it exists.
-    # 2. Only fall back to recognised centre aliases when "Centres" is absent.
-    exact_centres_col = next(
-        (column for column in df.columns if _normalise_header(column) == "centres"),
-        None,
-    )
-    centre_col = exact_centres_col or find(
-        "centre", "centers", "center",
-        "service centres", "service centre", "service centers", "service center",
-        "centre name", "center name", "location", "site",
-    )
-    status_col = find("status", "attendance status", "attended")
-    id_col = find("nric", "senior id", "client id", "member id", "participant id", "person id")
-    name_col = find("display name", "member name", "participant name", "senior name", "name")
-    activity_col = find("activity name", "programme name", "program name", "activity", "event name")
-    session_col = find("session detail", "session date", "activity date", "programme date", "event date", "date")
-    gender_col = find("gender", "sex")
-    client_col = find("is client", "client status", "client type")
-    boundary_col = find("within boundary", "boundary")
-    cfs_col = find("cfs from", "cfs")
-    domain_col = find("aap domain", "domain")
-
-    # Keep only genuine attended rows when an attendance/status field is present.
-    if status_col is not None:
-        status_text = df[status_col].astype(str).str.strip().str.lower()
-        attended_mask = status_text.isin(["attended", "present", "yes", "y", "1", "true"])
-        if attended_mask.any():
-            df = df.loc[attended_mask].copy()
-
-    # The supplied L'Harmoni attendance export has no NRIC field, so names are
-    # the official participant identifier for this page. Clean spacing and case
-    # before deduplication so minor formatting differences do not inflate counts.
-    if name_col is not None:
-        names = df[name_col].astype(str).str.strip()
-        names = names.str.replace(r"\s+", " ", regex=True)
-        names = names.mask(names.str.lower().isin(["", "nan", "none", "null"]))
-        df["_senior_identity"] = names.str.casefold()
-        df["_senior_display_name"] = names
-    elif id_col is not None:
-        # Safety fallback for future files that unexpectedly contain an ID but no name.
-        ids = df[id_col].astype(str).str.strip()
-        ids = ids.mask(ids.str.lower().isin(["", "nan", "none", "null"]))
-        df["_senior_identity"] = ids
-        df["_senior_display_name"] = ids
-    else:
-        df["_senior_identity"] = np.nan
-        df["_senior_display_name"] = np.nan
-
-    # Centre assignment. Prefer explicit row-level centre values. When none exist,
-    # allow the user to assign each uploaded file to a centre. This supports exports
-    # that omit a centre column but are supplied as separate BB and Nanyang files.
-    df["_lh_centre"] = np.nan
-    if centre_col is not None:
-        # Organisation rule: use the row-level Centres field. Any value containing
-        # "Bukit Batok" belongs to GLOW Bukit Batok; any value containing
-        # "Nanyang" belongs to GLOW Nanyang. Matching is case-insensitive and
-        # tolerates extra words such as "GLOW", "Tzu Chi" or location details.
-        centre_text = (
-            df[centre_col]
-            .astype(str)
-            .str.strip()
-            .str.replace(r"\s+", " ", regex=True)
-            .str.casefold()
+    if combined["ambiguous_count"]:
+        st.warning(
+            f"{combined['ambiguous_count']:,} row(s) contained both 'Bukit Batok' and 'Nanyang' "
+            "in the Centres field and were left unassigned."
         )
-        # Exact organisation rule: any Centres value containing the words
-        # "Bukit Batok" is Bukit Batok; any value containing "Nanyang" is Nanyang.
-        # Use literal, case-insensitive matching after whitespace normalisation so
-        # values such as "Tzu Chi SEEN @ Bukit Batok" classify correctly.
-        bb_mask = centre_text.str.contains("bukit batok", regex=False, na=False)
-        ny_mask = centre_text.str.contains("nanyang", regex=False, na=False)
-        df.loc[bb_mask, "_lh_centre"] = "GLOW Bukit Batok"
-        df.loc[ny_mask, "_lh_centre"] = "GLOW Nanyang"
+    if centre_col is None:
+        st.error(
+            "The uploaded file does not contain a Centres field. Add a Centres column so rows can be assigned "
+            "to Bukit Batok or Nanyang."
+        )
+    elif combined["unassigned_count"]:
+        st.warning(
+            f"{combined['unassigned_count']:,} row(s) in {centre_col!r} contained neither 'Bukit Batok' nor "
+            "'Nanyang' and were left unassigned."
+        )
 
-        # Flag ambiguous rows rather than silently assigning them.
-        ambiguous_mask = bb_mask & ny_mask
-        if ambiguous_mask.any():
-            df.loc[ambiguous_mask, "_lh_centre"] = np.nan
-            st.warning(
-                f"{int(ambiguous_mask.sum()):,} row(s) contained both 'Bukit Batok' and 'Nanyang' in "
-                f"the {centre_col!r} field and were left unassigned for review."
-            )
+    total_attendances = combined["total_attendances"]
+    total_unique = combined["total_unique"]
+    unique_tracked = combined["unique_tracked"]
+    centre_df = combined["centre_summary"]
 
-        unassigned_rows = int(df["_lh_centre"].isna().sum())
-        if unassigned_rows:
-            st.warning(
-                f"{unassigned_rows:,} row(s) in the {centre_col!r} field contained neither "
-                "'Bukit Batok' nor 'Nanyang' and were left unassigned."
-            )
+    def centre_participants(centre: str) -> int | None:
+        values = centre_df.loc[centre_df["Centre"] == centre, "Participants"]
+        if values.empty or pd.isna(values.iloc[0]):
+            return None
+        return int(values.iloc[0])
 
-    unresolved_files = sorted(df.loc[df["_lh_centre"].isna(), "_source_file"].dropna().astype(str).unique())
-    if unresolved_files:
-        with st.expander("Centre assignment for files without a centre field", expanded=True):
-            st.caption(
-                "Assign a file only when the entire file belongs to one centre. Do not use Is Client, Within Boundary, "
-                "AAP Domain or another unrelated field as a substitute for centre."
-            )
-            assignments = {}
-            for idx, filename in enumerate(unresolved_files):
-                assignments[filename] = st.selectbox(
-                    f"Centre for {filename}",
-                    ["Unassigned", "GLOW Bukit Batok", "GLOW Nanyang"],
-                    key=f"lh_file_centre_{idx}_{filename}",
-                )
-            for filename, assigned in assignments.items():
-                if assigned != "Unassigned":
-                    mask = df["_lh_centre"].isna() & (df["_source_file"].astype(str) == filename)
-                    df.loc[mask, "_lh_centre"] = assigned
-
-    total_attendances = int(len(df))
-    total_unique = int(df["_senior_identity"].dropna().nunique()) if df["_senior_identity"].notna().any() else None
-    # In this operational interpretation, unique seniors tracked is the deduplicated
-    # number of seniors represented in the attendance source across the available period.
-    unique_tracked = total_unique
-
-    centre_rows = []
-    for centre in ["GLOW Bukit Batok", "GLOW Nanyang"]:
-        part = df[df["_lh_centre"] == centre].copy()
-        centre_rows.append({
-            "Centre": centre,
-            "Attendances": int(len(part)),
-            "Participants": int(part["_senior_identity"].dropna().nunique()) if not part.empty else None,
-        })
-    centre_df = pd.DataFrame(centre_rows)
-    bb_value = centre_df.loc[centre_df["Centre"] == "GLOW Bukit Batok", "Participants"].iloc[0]
-    ny_value = centre_df.loc[centre_df["Centre"] == "GLOW Nanyang", "Participants"].iloc[0]
-    bb_value = None if pd.isna(bb_value) else int(bb_value)
-    ny_value = None if pd.isna(ny_value) else int(ny_value)
+    bb_value = centre_participants("GLOW Bukit Batok")
+    ny_value = centre_participants("GLOW Nanyang")
 
     st.markdown("## AIC/CST numerical indicators available from the attendance source")
     card_items = [
