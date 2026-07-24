@@ -2006,6 +2006,48 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
             st.warning(message)
         return
 
+    # Full CST KPI controls are kept separate from the existing attendance analysis.
+    # This preserves every current dashboard section while adding the assessment,
+    # outcome-study and implementation commitments stated in the CST application.
+    st.markdown("## CST reporting controls")
+    reporting_year, project_start_year = _year_and_start_controls(tables, "lharmoni")
+    with st.expander("One-year outcome calculation controls", expanded=False):
+        followup_min_days = int(st.number_input(
+            "Minimum days after enrolment for one-year follow-up",
+            min_value=1, max_value=730, value=335, step=1,
+            key="lharmoni_followup_min_days",
+        ))
+        followup_max_days = int(st.number_input(
+            "Maximum days after enrolment for one-year follow-up",
+            min_value=1, max_value=730, value=395, step=1,
+            key="lharmoni_followup_max_days",
+        ))
+        timing_rule_approved = st.checkbox(
+            "Approved: use this follow-up window for the official 60% KPI",
+            value=False,
+            key="lharmoni_timing_rule_approved",
+            help="The official outcome rate remains unavailable until the reporting owner approves the timing rule.",
+        )
+        raw_score_rule_approved = st.checkbox(
+            "Approved: interpret raw MMSE, GDS and SPPB score direction",
+            value=False,
+            key="lharmoni_raw_score_rule_approved",
+            help="Use only after confirming that higher/lower score direction and maintenance rules match the approved methodology.",
+        )
+    if followup_max_days < followup_min_days:
+        st.error("Maximum follow-up days must be greater than or equal to minimum follow-up days.")
+        return
+
+    cst_result = analyse_lharmoni(
+        tables,
+        reporting_year,
+        project_start_year,
+        followup_min_days=followup_min_days,
+        followup_max_days=followup_max_days,
+        timing_rule_approved=timing_rule_approved,
+        raw_score_rule_approved=raw_score_rule_approved,
+    )
+
     combined = analyse_lharmoni_combined_tables(tables)
     file_errors = list(file_errors) + list(combined.get("errors", []))
     df = combined.get("data")
@@ -2057,6 +2099,76 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
 
     bb_value = centre_participants("GLOW Bukit Batok")
     ny_value = centre_participants("GLOW Nanyang")
+
+    # Add every fixed numerical KPI and monitoring commitment from the CST PDF.
+    # Existing operational attendance KPIs below are intentionally retained.
+    st.markdown("## Full CST KPI tracking")
+    with st.expander("All AIC/CST L’Harmoni indicators reflected in this dashboard", expanded=True):
+        _targets_table("LHARMONI")
+        st.caption(
+            "Participation targets come from the beneficiary table. The annual assessment cohort and three-year tracking commitment use complete MMSE, GDS and SPPB evidence."
+        )
+
+    formal_bb = cst_result.centre_summary.loc[
+        cst_result.centre_summary["centre"] == "GLOW Bukit Batok", "participating_seniors"
+    ].dropna()
+    formal_ny = cst_result.centre_summary.loc[
+        cst_result.centre_summary["centre"] == "GLOW Nanyang", "participating_seniors"
+    ].dropna()
+    formal_bb_value = float(formal_bb.iloc[0]) if not formal_bb.empty else None
+    formal_ny_value = float(formal_ny.iloc[0]) if not formal_ny.empty else None
+
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        _metric_card("L’Harmoni participants", cst_result.totals.get("participating_seniors"), 1000, note="Explicit project enrolment only")
+    with k2:
+        _metric_card("GLOW Bukit Batok participants", formal_bb_value, 500, note="Explicit L’Harmoni enrolment")
+    with k3:
+        _metric_card("GLOW Nanyang participants", formal_ny_value, 500, note="Explicit L’Harmoni enrolment")
+    k4, k5, k6 = st.columns(3)
+    with k4:
+        _metric_card("Official one-year outcome rate", cst_result.totals.get("official_outcome_rate"), 0.60, percentage=True, note="Improve/maintain physical and/or cognitive wellbeing")
+    with k5:
+        _metric_card("Complete assessment sets", cst_result.totals.get("complete_assessment_sets_annual"), 100, note=f"MMSE + GDS + SPPB, {reporting_year}")
+    with k6:
+        _metric_card("Unique seniors tracked", cst_result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year + 2}")
+
+    _progress_comparison_chart([
+        {"label": "L’Harmoni participants", "value": cst_result.totals.get("participating_seniors"), "target": 1000},
+        {"label": "GLOW Bukit Batok participants", "value": formal_bb_value, "target": 500},
+        {"label": "GLOW Nanyang participants", "value": formal_ny_value, "target": 500},
+        {"label": "One-year outcome rate", "value": cst_result.totals.get("official_outcome_rate"), "target": 0.60, "percentage": True},
+        {"label": "Complete assessment sets", "value": cst_result.totals.get("complete_assessment_sets_annual"), "target": 100},
+        {"label": "Unique seniors tracked", "value": cst_result.totals.get("unique_tracked_seniors_3_year"), "target": 300},
+    ], "L’Harmoni current versus official CST targets", "lharmoni_full_cst_progress")
+
+    st.markdown("### One-year outcome evidence")
+    o1, o2, o3 = st.columns(3)
+    with o1:
+        _metric_card("Tracked seniors due", cst_result.totals.get("tracked_seniors_due"))
+    with o2:
+        _metric_card("Valid one-year outcomes", cst_result.totals.get("outcome_eligible_seniors"))
+    with o3:
+        _metric_card("Improved or maintained", cst_result.totals.get("improved_or_maintained_seniors"))
+    o4, o5, _ = st.columns(3)
+    with o4:
+        _metric_card("One-year assessment coverage", cst_result.totals.get("one_year_assessment_coverage"), percentage=True)
+    with o5:
+        _metric_card("Completed-assessment outcome rate", cst_result.totals.get("completed_assessment_outcome_rate"), percentage=True, note="Supporting measure only")
+
+    st.markdown("### Annual health assessment coverage")
+    h1, h2, h3 = st.columns(3)
+    with h1:
+        _metric_card("MMSE completed", cst_result.totals.get("mmse_completed_annual"))
+    with h2:
+        _metric_card("GDS completed", cst_result.totals.get("gds_completed_annual"))
+    with h3:
+        _metric_card("SPPB completed", cst_result.totals.get("sppb_completed_annual"))
+
+    st.markdown("### L’Harmoni implementation milestones")
+    st.dataframe(cst_result.milestone_summary, use_container_width=True, hide_index=True)
+    _messages(cst_result, [])
+    _audit_tabs(cst_result)
 
     st.markdown("## AIC/CST numerical indicators available from the attendance source")
     card_items = [
