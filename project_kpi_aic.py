@@ -1927,16 +1927,15 @@ def analyse_lharmoni_combined_tables(tables: list[SourceTable]) -> dict[str, Any
 
 def render_lharmoni_page(template_path: Path | None = None) -> None:
     _inject_metric_card_css()
-    _header("Project L’Harmoni KPI Dashboard", "GLOW Bukit Batok and GLOW Nanyang only. Official participation, one-year physical/cognitive outcome, annual assessment and implementation measures.")
-    st.info("Only records explicitly identified as GLOW Bukit Batok or GLOW Nanyang are included. SEEN and service-unspecified records are excluded from official L’Harmoni figures.")
-    with st.expander("All AIC/CST L’Harmoni indicators reflected in this dashboard", expanded=True):
-        _targets_table("LHARMONI")
-        st.caption("The dashboard also shows one-year assessment coverage, track/session monitoring, transitions, ICCP escalation and implementation milestones where source data exists.")
+    _header("L’Harmoni — Combined GLOW KPI Dashboard", "Combined operational attendance KPIs for GLOW Bukit Batok and GLOW Nanyang.")
+    st.info("Centre classification follows the Centres field: values containing Bukit Batok are assigned to GLOW Bukit Batok, and values containing Nanyang are assigned to GLOW Nanyang.")
+    with st.expander("AIC/CST numerical indicators available from the attendance source", expanded=True):
+        st.caption("Participant counts use unique cleaned names. Centre counts use the Centres field according to the organisation rule.")
     if template_path and template_path.exists():
         st.download_button("Download controlled AIC project data template", template_path.read_bytes(), file_name=template_path.name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     files = _upload_files("Upload L’Harmoni source file(s)", "lharmoni_aic_upload")
     if not files:
-        st.caption("Upload structured source files. The official 60% KPI is withheld unless the one-year timing rule is explicitly approved below.")
+        st.caption("Upload the L’Harmoni attendance source file. Unique participants are calculated using cleaned names.")
         return
     tables, file_errors = read_project_files(files)
     if not tables:
@@ -2006,8 +2005,8 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         shown = "Data unavailable" if value is None else f"{value:,}"
         card_html.append(
             '<div class="aic-kpi-card">'
-            f'<div class="aic-kpi-label">{html.escape(label)}</div>'
-            f'<div class="aic-kpi-value">{html.escape(shown)}</div>'
+            f'<div class="aic-kpi-label">{html_lib.escape(str(label))}</div>'
+            f'<div class="aic-kpi-value">{html_lib.escape(str(shown))}</div>'
             f'<div class="aic-kpi-target">Target: {target:,}</div>'
             '</div>'
         )
@@ -2057,8 +2056,8 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         ("Average attendance per session", f"{average:,.1f}" if average is not None else "Data unavailable"),
     ]
     overview_html = '<div class="aic-kpi-grid">' + ''.join(
-        f'<div class="aic-kpi-card"><div class="aic-kpi-label">{html.escape(a)}</div>'
-        f'<div class="aic-kpi-value">{html.escape(b)}</div></div>' for a, b in overview_cards
+        f'<div class="aic-kpi-card"><div class="aic-kpi-label">{html_lib.escape(str(a))}</div>'
+        f'<div class="aic-kpi-value">{html_lib.escape(str(b))}</div></div>' for a, b in overview_cards
     ) + '</div>'
     st.markdown(overview_html, unsafe_allow_html=True)
 
