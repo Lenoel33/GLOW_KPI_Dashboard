@@ -101,3 +101,9 @@ For the mock workbook use:
 - AIC submission-readiness table identifies missing evidence.
 
 A final human reconciliation against the source system remains mandatory before any submission to AIC.
+
+## KPI card readability update
+- Project APRIL and L'Harmoni KPI cards now use responsive HTML cards instead of Streamlit's fixed metric component.
+- Long KPI names, values, targets and explanatory notes wrap fully instead of being clipped.
+- Cards expand vertically, use responsive font sizes, and retain progress bars.
+- This update does not change KPI formulas, centre scope, file extraction or the original Centre Dashboard functionality.

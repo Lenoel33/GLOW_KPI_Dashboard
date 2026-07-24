@@ -1378,17 +1378,119 @@ def _fmt_pct(value: Any) -> str:
     return f"{float(value):.1%}"
 
 
-def _metric_card(label: str, value: Any, target: float | int | None = None, percentage: bool = False, note: str | None = None) -> None:
-    display = _fmt_pct(value) if percentage else _fmt_count(value)
+def _inject_metric_card_css() -> None:
+    """Apply responsive KPI-card styling so labels, values and notes never clip."""
+    st.markdown(
+        """
+        <style>
+        .aic-kpi-card {
+            background: #FFFFFF;
+            border: 1px solid #E9D6B3;
+            border-radius: 18px;
+            padding: 18px 18px 16px 18px;
+            min-height: 176px;
+            height: auto;
+            box-shadow: 0 6px 18px rgba(13,43,69,.08);
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-start;
+            overflow: visible;
+            margin-bottom: 12px;
+            box-sizing: border-box;
+        }
+        .aic-kpi-label {
+            color: #55623B;
+            font-weight: 750;
+            font-size: clamp(.88rem, 1.05vw, 1.02rem);
+            line-height: 1.28;
+            min-height: 2.55em;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: normal;
+            margin-bottom: 10px;
+        }
+        .aic-kpi-value {
+            color: #0D2B45;
+            font-weight: 850;
+            font-size: clamp(1.65rem, 2.5vw, 2.65rem);
+            line-height: 1.08;
+            white-space: normal;
+            overflow-wrap: anywhere;
+            word-break: normal;
+            margin-bottom: 8px;
+        }
+        .aic-kpi-value.aic-long {
+            font-size: clamp(1.22rem, 1.75vw, 1.9rem);
+        }
+        .aic-kpi-target {
+            color: #C45D2D;
+            font-weight: 700;
+            font-size: .9rem;
+            line-height: 1.25;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        .aic-kpi-note {
+            color: #55623B;
+            font-size: .82rem;
+            line-height: 1.3;
+            margin-top: 7px;
+            white-space: normal;
+            overflow-wrap: anywhere;
+        }
+        div[data-testid="column"] { min-width: 0; }
+        @media (max-width: 900px) {
+            .aic-kpi-card { min-height: 156px; padding: 16px; }
+            .aic-kpi-label { min-height: auto; }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _metric_card(
+    label: str,
+    value: Any,
+    target: float | int | None = None,
+    percentage: bool = False,
+    note: str | None = None,
+    decimals: int | None = None,
+) -> None:
+    """Render a full-height, wrapping KPI card that cannot truncate long text."""
+    if value is None or pd.isna(value):
+        display = "Data unavailable"
+    elif percentage:
+        display = f"{float(value):.1%}"
+    elif decimals is not None:
+        display = f"{float(value):,.{decimals}f}"
+    else:
+        display = f"{int(round(float(value))):,}"
+
     target_text = None
     if target is not None:
         target_text = f"Target: {target:.0%}" if percentage else f"Target: {int(target):,}"
-    st.metric(label, display, target_text)
+
+    safe_label = html_lib.escape(str(label))
+    safe_display = html_lib.escape(display)
+    safe_target = html_lib.escape(target_text) if target_text else ""
+    safe_note = html_lib.escape(str(note)) if note else ""
+    long_class = " aic-long" if len(display) > 12 else ""
+
+    st.markdown(
+        f"""
+        <div class="aic-kpi-card">
+          <div class="aic-kpi-label">{safe_label}</div>
+          <div class="aic-kpi-value{long_class}">{safe_display}</div>
+          {f'<div class="aic-kpi-target">{safe_target}</div>' if safe_target else ''}
+          {f'<div class="aic-kpi-note">{safe_note}</div>' if safe_note else ''}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if target is not None and value is not None and not pd.isna(value):
         ratio = float(value) / float(target) if target else 0
         st.progress(min(max(ratio, 0), 1))
-    if note:
-        st.caption(note)
 
 
 def _header(title: str, subtitle: str) -> None:
@@ -1455,6 +1557,7 @@ def _upload_files(label: str, key: str):
 
 
 def render_april_page(template_path: Path | None = None) -> None:
+    _inject_metric_card_css()
     _header("Project APRIL KPI Dashboard", "All four centres. Official CST indicators, annual beneficiary commitments, outcome-study measures, evaluation measures and implementation milestones.")
     st.info("Project APRIL uses GLOW Bukit Batok, Tzu Chi SEEN @ Bukit Batok, GLOW Nanyang and Tzu Chi SEEN @ Nanyang. Ordinary attendance is not treated as APRIL participation unless the project is explicitly identified.")
     with st.expander("All AIC/CST APRIL indicators reflected in this dashboard", expanded=True):
@@ -1526,11 +1629,9 @@ def render_april_page(template_path: Path | None = None) -> None:
     with s1: _metric_card("APRIL interactions", result.supplementary.get("april_interactions_annual"), note=str(reporting_year))
     with s2: _metric_card("Unique APRIL users", result.supplementary.get("unique_active_april_users_annual"), note=str(reporting_year))
     with s3:
-        value = result.supplementary.get("total_staff_hours_saved")
-        st.metric("Staff hours saved", "Data unavailable" if value is None else f"{value:,.1f}")
+        _metric_card("Staff hours saved", result.supplementary.get("total_staff_hours_saved"), decimals=1)
     with s4:
-        value = result.supplementary.get("average_satisfaction_rating")
-        st.metric("Average satisfaction rating", "Data unavailable" if value is None else f"{value:,.2f}")
+        _metric_card("Average satisfaction rating", result.supplementary.get("average_satisfaction_rating"), decimals=2)
     if result.supplementary.get("explicit_satisfaction_rate") is not None:
         st.caption(f"Explicit satisfaction rate: {result.supplementary['explicit_satisfaction_rate']:.1%} across {int(result.supplementary.get('satisfaction_respondents') or 0)} respondent(s).")
 
@@ -1541,6 +1642,7 @@ def render_april_page(template_path: Path | None = None) -> None:
 
 
 def render_lharmoni_page(template_path: Path | None = None) -> None:
+    _inject_metric_card_css()
     _header("Project L’Harmoni KPI Dashboard", "GLOW Bukit Batok and GLOW Nanyang only. Official participation, one-year physical/cognitive outcome, annual assessment and implementation measures.")
     st.info("Only records explicitly identified as GLOW Bukit Batok or GLOW Nanyang are included. SEEN and service-unspecified records are excluded from official L’Harmoni figures.")
     with st.expander("All AIC/CST L’Harmoni indicators reflected in this dashboard", expanded=True):
