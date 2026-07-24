@@ -1915,94 +1915,321 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
     _audit_tabs(result)
 
 # -----------------------------------------------------------------------------
-# L'Harmoni is an operational reporting name for the combined GLOW Bukit Batok
-# and GLOW Nanyang centre KPIs. It is not treated as a separate project.
+# L'Harmoni is the reporting name for the combined GLOW Bukit Batok and
+# GLOW Nanyang KPI view. It is not treated as a separate project dataset.
 # -----------------------------------------------------------------------------
 def render_lharmoni_page(template_path: Path | None = None) -> None:
     _inject_metric_card_css()
-    _header("L’Harmoni — Combined GLOW Centre KPIs", "Combined operational view for GLOW Bukit Batok and GLOW Nanyang. L’Harmoni is a reporting name, not a separate project.")
-    st.info("Upload the attendance/export file used for the two GLOW centres. The dashboard calculates normal centre attendance and participation KPIs and does not require L’Harmoni enrolment, one-year outcome, project-track or milestone fields.")
-    files = _upload_files("Upload GLOW Bukit Batok and GLOW Nanyang source file(s)", "lharmoni_combined_glow_upload")
+    _header(
+        "L’Harmoni — Combined GLOW Centre KPIs",
+        "Combined reporting view for GLOW Bukit Batok and GLOW Nanyang. L’Harmoni is a reporting name, not a separate project.",
+    )
+    st.info(
+        "Upload attendance/export files for the two GLOW centres. Total participants and unique seniors tracked are "
+        "calculated from cleaned participant names. Centre totals are read from the Centres field: values containing "
+        "'Bukit Batok' are assigned to GLOW Bukit Batok, while values containing 'Nanyang' are assigned to GLOW Nanyang."
+    )
+
+    files = _upload_files(
+        "Upload GLOW Bukit Batok and GLOW Nanyang source file(s)",
+        "lharmoni_combined_glow_upload",
+    )
     if not files:
         st.caption("Upload Excel, CSV or other supported structured attendance files to build the combined L’Harmoni view.")
         return
+
     tables, file_errors = read_project_files(files)
     if not tables:
         st.error("No readable tables were found in the uploaded files.")
         return
-    df = pd.concat([t.data.assign(_source_file=t.source_file, _source_sheet=t.source_sheet) for t in tables], ignore_index=True, sort=False)
-    norm = {str(c).strip().lower().replace("_", " "): c for c in df.columns}
-    def find(*names):
-        for n in names:
-            n2=n.lower()
-            for k,c in norm.items():
-                if k==n2 or n2 in k or k in n2:
+
+    frames = []
+    for t in tables:
+        frame = t.data.copy()
+        frame["_source_file"] = t.source_file
+        frame["_source_sheet"] = t.source_sheet
+        frames.append(frame)
+    df = pd.concat(frames, ignore_index=True, sort=False)
+
+    def _normalise_header(value: object) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", str(value).strip().lower()).strip()
+
+    norm = {_normalise_header(c): c for c in df.columns}
+
+    def find(*names: str):
+        wanted = [_normalise_header(n) for n in names]
+        for n in wanted:
+            for k, c in norm.items():
+                if k == n:
+                    return c
+        for n in wanted:
+            for k, c in norm.items():
+                if n in k or k in n:
                     return c
         return None
-    centre_col=find("centre","center","service centre","location")
-    status_col=find("status","attendance status")
-    id_col=find("nric","senior id","client id","member id","participant id")
-    name_col=find("display name","name")
-    activity_col=find("activity name","programme name","program name","activity")
-    session_col=find("session detail","session date","activity date","date")
-    gender_col=find("gender","sex")
-    client_col=find("is client","client status")
-    boundary_col=find("within boundary","boundary")
-    cfs_col=find("cfs from","cfs")
-    domain_col=find("aap domain","domain")
 
+    # Organisation-specific centre logic:
+    # 1. Prefer the exact field named "Centres" whenever it exists.
+    # 2. Only fall back to recognised centre aliases when "Centres" is absent.
+    exact_centres_col = next(
+        (column for column in df.columns if _normalise_header(column) == "centres"),
+        None,
+    )
+    centre_col = exact_centres_col or find(
+        "centre", "centers", "center",
+        "service centres", "service centre", "service centers", "service center",
+        "centre name", "center name", "location", "site",
+    )
+    status_col = find("status", "attendance status", "attended")
+    id_col = find("nric", "senior id", "client id", "member id", "participant id", "person id")
+    name_col = find("display name", "member name", "participant name", "senior name", "name")
+    activity_col = find("activity name", "programme name", "program name", "activity", "event name")
+    session_col = find("session detail", "session date", "activity date", "programme date", "event date", "date")
+    gender_col = find("gender", "sex")
+    client_col = find("is client", "client status", "client type")
+    boundary_col = find("within boundary", "boundary")
+    cfs_col = find("cfs from", "cfs")
+    domain_col = find("aap domain", "domain")
+
+    # Keep only genuine attended rows when an attendance/status field is present.
     if status_col is not None:
-        mask=df[status_col].astype(str).str.strip().str.lower().isin(["attended","present","yes"])
-        if mask.any(): df=df.loc[mask].copy()
-    if centre_col is not None:
-        c=df[centre_col].astype(str).str.lower()
-        glow_mask=(c.str.contains("glow") & (c.str.contains("bukit batok")|c.str.contains("nanyang")))
-        if glow_mask.any(): df=df.loc[glow_mask].copy()
+        status_text = df[status_col].astype(str).str.strip().str.lower()
+        attended_mask = status_text.isin(["attended", "present", "yes", "y", "1", "true"])
+        if attended_mask.any():
+            df = df.loc[attended_mask].copy()
 
-    identity = id_col or name_col
-    total=len(df)
-    unique=df[identity].astype(str).str.strip().replace("",np.nan).nunique() if identity else None
-    activities=df[activity_col].astype(str).str.strip().replace("",np.nan).nunique() if activity_col else None
+    # The supplied L'Harmoni attendance export has no NRIC field, so names are
+    # the official participant identifier for this page. Clean spacing and case
+    # before deduplication so minor formatting differences do not inflate counts.
+    if name_col is not None:
+        names = df[name_col].astype(str).str.strip()
+        names = names.str.replace(r"\s+", " ", regex=True)
+        names = names.mask(names.str.lower().isin(["", "nan", "none", "null"]))
+        df["_senior_identity"] = names.str.casefold()
+        df["_senior_display_name"] = names
+    elif id_col is not None:
+        # Safety fallback for future files that unexpectedly contain an ID but no name.
+        ids = df[id_col].astype(str).str.strip()
+        ids = ids.mask(ids.str.lower().isin(["", "nan", "none", "null"]))
+        df["_senior_identity"] = ids
+        df["_senior_display_name"] = ids
+    else:
+        df["_senior_identity"] = np.nan
+        df["_senior_display_name"] = np.nan
+
+    # Centre assignment. Prefer explicit row-level centre values. When none exist,
+    # allow the user to assign each uploaded file to a centre. This supports exports
+    # that omit a centre column but are supplied as separate BB and Nanyang files.
+    df["_lh_centre"] = np.nan
+    if centre_col is not None:
+        # Organisation rule: use the row-level Centres field. Any value containing
+        # "Bukit Batok" belongs to GLOW Bukit Batok; any value containing
+        # "Nanyang" belongs to GLOW Nanyang. Matching is case-insensitive and
+        # tolerates extra words such as "GLOW", "Tzu Chi" or location details.
+        centre_text = (
+            df[centre_col]
+            .astype(str)
+            .str.strip()
+            .str.replace(r"\s+", " ", regex=True)
+            .str.casefold()
+        )
+        # Exact organisation rule: any Centres value containing the words
+        # "Bukit Batok" is Bukit Batok; any value containing "Nanyang" is Nanyang.
+        # Use literal, case-insensitive matching after whitespace normalisation so
+        # values such as "Tzu Chi SEEN @ Bukit Batok" classify correctly.
+        bb_mask = centre_text.str.contains("bukit batok", regex=False, na=False)
+        ny_mask = centre_text.str.contains("nanyang", regex=False, na=False)
+        df.loc[bb_mask, "_lh_centre"] = "GLOW Bukit Batok"
+        df.loc[ny_mask, "_lh_centre"] = "GLOW Nanyang"
+
+        # Flag ambiguous rows rather than silently assigning them.
+        ambiguous_mask = bb_mask & ny_mask
+        if ambiguous_mask.any():
+            df.loc[ambiguous_mask, "_lh_centre"] = np.nan
+            st.warning(
+                f"{int(ambiguous_mask.sum()):,} row(s) contained both 'Bukit Batok' and 'Nanyang' in "
+                f"the {centre_col!r} field and were left unassigned for review."
+            )
+
+        unassigned_rows = int(df["_lh_centre"].isna().sum())
+        if unassigned_rows:
+            st.warning(
+                f"{unassigned_rows:,} row(s) in the {centre_col!r} field contained neither "
+                "'Bukit Batok' nor 'Nanyang' and were left unassigned."
+            )
+
+    unresolved_files = sorted(df.loc[df["_lh_centre"].isna(), "_source_file"].dropna().astype(str).unique())
+    if unresolved_files:
+        with st.expander("Centre assignment for files without a centre field", expanded=True):
+            st.caption(
+                "Assign a file only when the entire file belongs to one centre. Do not use Is Client, Within Boundary, "
+                "AAP Domain or another unrelated field as a substitute for centre."
+            )
+            assignments = {}
+            for idx, filename in enumerate(unresolved_files):
+                assignments[filename] = st.selectbox(
+                    f"Centre for {filename}",
+                    ["Unassigned", "GLOW Bukit Batok", "GLOW Nanyang"],
+                    key=f"lh_file_centre_{idx}_{filename}",
+                )
+            for filename, assigned in assignments.items():
+                if assigned != "Unassigned":
+                    mask = df["_lh_centre"].isna() & (df["_source_file"].astype(str) == filename)
+                    df.loc[mask, "_lh_centre"] = assigned
+
+    total_attendances = int(len(df))
+    total_unique = int(df["_senior_identity"].dropna().nunique()) if df["_senior_identity"].notna().any() else None
+    # In this operational interpretation, unique seniors tracked is the deduplicated
+    # number of seniors represented in the attendance source across the available period.
+    unique_tracked = total_unique
+
+    centre_rows = []
+    for centre in ["GLOW Bukit Batok", "GLOW Nanyang"]:
+        part = df[df["_lh_centre"] == centre].copy()
+        centre_rows.append({
+            "Centre": centre,
+            "Attendances": int(len(part)),
+            "Participants": int(part["_senior_identity"].dropna().nunique()) if not part.empty else None,
+        })
+    centre_df = pd.DataFrame(centre_rows)
+    bb_value = centre_df.loc[centre_df["Centre"] == "GLOW Bukit Batok", "Participants"].iloc[0]
+    ny_value = centre_df.loc[centre_df["Centre"] == "GLOW Nanyang", "Participants"].iloc[0]
+    bb_value = None if pd.isna(bb_value) else int(bb_value)
+    ny_value = None if pd.isna(ny_value) else int(ny_value)
+
+    st.markdown("## AIC/CST numerical indicators available from the attendance source")
+    card_items = [
+        ("Total participating seniors", total_unique, 1000),
+        ("GLOW Bukit Batok participants", bb_value, 500),
+        ("GLOW Nanyang participants", ny_value, 500),
+        ("Unique seniors tracked", unique_tracked, 300),
+    ]
+    card_html = []
+    for label, value, target in card_items:
+        shown = "Data unavailable" if value is None else f"{value:,}"
+        card_html.append(
+            '<div class="aic-kpi-card">'
+            f'<div class="aic-kpi-label">{html.escape(label)}</div>'
+            f'<div class="aic-kpi-value">{html.escape(shown)}</div>'
+            f'<div class="aic-kpi-target">Target: {target:,}</div>'
+            '</div>'
+        )
+    st.markdown('<div class="aic-kpi-grid">' + ''.join(card_html) + '</div>', unsafe_allow_html=True)
+
+    chart_rows = []
+    for label, value, target in card_items:
+        if value is not None:
+            chart_rows.append({"KPI": label, "Current": value, "Target": target})
+    if chart_rows:
+        chart_df = pd.DataFrame(chart_rows)
+        fig = px.bar(
+            chart_df,
+            y="KPI",
+            x=["Current", "Target"],
+            orientation="h",
+            barmode="group",
+            text_auto=True,
+            title="Current result compared with target",
+        )
+        fig.update_layout(
+            xaxis_title="Seniors",
+            yaxis_title=None,
+            legend_title=None,
+            margin=dict(l=20, r=20, t=60, b=30),
+            plot_bgcolor="rgba(0,0,0,0)",
+            paper_bgcolor="rgba(0,0,0,0)",
+            height=max(360, 95 * len(chart_df)),
+        )
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("## Combined operational overview")
+    activities = df[activity_col].astype(str).str.strip().replace("", np.nan).nunique() if activity_col else None
     if session_col and activity_col:
-        sessions=df[[activity_col,session_col]].astype(str).drop_duplicates().shape[0]
-    elif session_col: sessions=df[session_col].astype(str).nunique()
-    else: sessions=None
-    avg=(total/sessions) if sessions else None
+        sessions = df[[activity_col, session_col]].astype(str).drop_duplicates().shape[0]
+    elif session_col:
+        sessions = df[session_col].astype(str).nunique()
+    else:
+        sessions = None
+    average = total_attendances / sessions if sessions else None
+    overview_cards = [
+        ("Total attendances", f"{total_attendances:,}"),
+        ("Unique seniors", f"{total_unique:,}" if total_unique is not None else "Data unavailable"),
+        ("Activities", f"{activities:,}" if activities is not None else "Data unavailable"),
+        ("Programme sessions", f"{sessions:,}" if sessions is not None else "Data unavailable"),
+        ("Average attendance per session", f"{average:,.1f}" if average is not None else "Data unavailable"),
+    ]
+    overview_html = '<div class="aic-kpi-grid">' + ''.join(
+        f'<div class="aic-kpi-card"><div class="aic-kpi-label">{html.escape(a)}</div>'
+        f'<div class="aic-kpi-value">{html.escape(b)}</div></div>' for a, b in overview_cards
+    ) + '</div>'
+    st.markdown(overview_html, unsafe_allow_html=True)
 
-    st.markdown("## Combined overview")
-    cards=[("Total attendances", f"{total:,}"),("Unique seniors", f"{unique:,}" if unique is not None else "Data unavailable"),("Activities", f"{activities:,}" if activities is not None else "Data unavailable"),("Programme sessions", f"{sessions:,}" if sessions is not None else "Data unavailable"),("Average attendance per session", f"{avg:,.1f}" if avg is not None else "Data unavailable")]
-    html='<div class="aic-kpi-grid">'+''.join(f'<div class="aic-kpi-card"><div class="aic-kpi-label">{html.escape(a)}</div><div class="aic-kpi-value">{html.escape(b)}</div></div>' for a,b in cards)+'</div>'
-    st.markdown(html,unsafe_allow_html=True)
-
-    if centre_col is not None:
-        comp=[]
-        for label,pattern in [("GLOW Bukit Batok","bukit batok"),("GLOW Nanyang","nanyang")]:
-            part=df[df[centre_col].astype(str).str.lower().str.contains(pattern,na=False)]
-            comp.append({"Centre":label,"Attendances":len(part),"Unique seniors":part[identity].astype(str).nunique() if identity else np.nan})
-        comp_df=pd.DataFrame(comp)
-        st.markdown("## Centre comparison")
-        st.dataframe(comp_df,use_container_width=True,hide_index=True)
-        fig=px.bar(comp_df,x="Centre",y=["Attendances","Unique seniors"],barmode="group",title="GLOW Bukit Batok versus GLOW Nanyang")
-        st.plotly_chart(fig,use_container_width=True)
+    st.markdown("## Centre comparison")
+    if centre_df["Participants"].notna().any():
+        display_centre = centre_df.copy()
+        display_centre["Participants"] = display_centre["Participants"].apply(
+            lambda x: "Data unavailable" if pd.isna(x) else f"{int(x):,}"
+        )
+        st.dataframe(display_centre, use_container_width=True, hide_index=True)
+    else:
+        st.warning(
+            "The uploaded source has no centre field and has not been assigned by file, so the dashboard cannot safely "
+            "split participants between GLOW Bukit Batok and GLOW Nanyang. The combined total is calculated from cleaned participant names."
+        )
 
     if activity_col is not None:
-        act=df.groupby(activity_col).agg(Attendances=(activity_col,"size"))
-        if identity: act["Unique seniors"]=df.groupby(activity_col)[identity].nunique()
-        act=act.reset_index().sort_values("Attendances",ascending=False).head(20)
+        grouped = df.groupby(activity_col, dropna=False)
+        act = grouped.size().rename("Attendances").to_frame()
+        if df["_senior_identity"].notna().any():
+            act["Unique seniors"] = grouped["_senior_identity"].nunique()
+        act = act.reset_index().sort_values("Attendances", ascending=False).head(20)
         st.markdown("## Top activities")
-        st.dataframe(act,use_container_width=True,hide_index=True)
-        fig=px.bar(act.sort_values("Attendances"),x="Attendances",y=activity_col,orientation="h",title="Top activities by attendance")
-        st.plotly_chart(fig,use_container_width=True)
+        st.dataframe(act, use_container_width=True, hide_index=True)
+        fig = px.bar(
+            act.sort_values("Attendances"),
+            x="Attendances",
+            y=activity_col,
+            orientation="h",
+            title="Top activities by attendance",
+            text_auto=True,
+        )
+        fig.update_layout(height=650, yaxis_title=None, xaxis_title="Attendances")
+        st.plotly_chart(fig, use_container_width=True)
 
-    for col,title in [(domain_col,"AAP domain distribution"),(cfs_col,"CFS distribution"),(gender_col,"Gender distribution"),(client_col,"Client / non-client split"),(boundary_col,"Boundary participation")]:
+    for col, title in [
+        (domain_col, "AAP domain distribution"),
+        (cfs_col, "CFS distribution"),
+        (gender_col, "Gender distribution"),
+        (client_col, "Client / non-client split"),
+        (boundary_col, "Boundary participation"),
+    ]:
         if col is not None:
-            vc=df[col].fillna("Unknown").astype(str).value_counts().reset_index(); vc.columns=[title,"Count"]
+            vc = df[col].fillna("Unknown").astype(str).value_counts().reset_index()
+            vc.columns = [title, "Count"]
             st.markdown(f"## {title}")
-            st.dataframe(vc,use_container_width=True,hide_index=True)
-            st.plotly_chart(px.bar(vc,x=title,y="Count",title=title),use_container_width=True)
+            st.dataframe(vc, use_container_width=True, hide_index=True)
+            st.plotly_chart(px.bar(vc, x=title, y="Count", title=title, text_auto=True), use_container_width=True)
 
     st.markdown("## Source and field audit")
-    audit=pd.DataFrame({"Required concept":["Centre","Attendance status","Senior identifier","Activity","Session/date","Gender","Client status","Boundary","CFS","AAP domain"],"Matched field":[centre_col,status_col,identity,activity_col,session_col,gender_col,client_col,boundary_col,cfs_col,domain_col]})
-    audit["Status"]=audit["Matched field"].apply(lambda x:"Matched" if x else "Data unavailable")
-    st.dataframe(audit,use_container_width=True,hide_index=True)
-    for e in file_errors: st.warning(e)
+    audit = pd.DataFrame({
+        "Required concept": [
+            "Centre", "Attendance status", "Senior identifier", "Activity", "Session/date",
+            "Gender", "Client status", "Boundary", "CFS", "AAP domain",
+        ],
+        "Matched field": [
+            centre_col, status_col, id_col or name_col, activity_col, session_col,
+            gender_col, client_col, boundary_col, cfs_col, domain_col,
+        ],
+    })
+    audit["Status"] = audit["Matched field"].apply(lambda x: "Matched" if x else "Data unavailable")
+    st.dataframe(audit, use_container_width=True, hide_index=True)
+
+    if centre_col is None:
+        st.caption(
+            "This source contains participant data but no explicit centre column. Total participants and unique tracked seniors "
+            "are therefore available using cleaned participant names; centre-specific participant figures require separate centre files or a genuine centre field."
+        )
+    for error in file_errors:
+        st.warning(error)
+

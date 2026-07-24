@@ -116,3 +116,13 @@ The APRIL and L'Harmoni pages now use a maximum of three KPI cards per row. Six-
 ## KPI comparison charts
 
 The APRIL and L’Harmoni pages use grouped horizontal bar charts with separate Current and Target bars. Count KPIs and percentage KPIs are placed in separate charts so unlike units never share an axis. Missing values are omitted rather than shown as zero.
+
+## L'Harmoni centre classification rule
+
+The combined L'Harmoni page reads the row-level `Centres` field.
+
+- Any value containing `Bukit Batok` is classified as `GLOW Bukit Batok`.
+- Any value containing `Nanyang` is classified as `GLOW Nanyang`.
+- Matching is case-insensitive and allows additional words in the field.
+- Participant totals are deduplicated using cleaned participant names.
+- A row containing both location names is left unassigned and flagged for review.
