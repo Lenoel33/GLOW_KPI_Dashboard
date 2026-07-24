@@ -1515,77 +1515,115 @@ def _metric_card(
         """,
         unsafe_allow_html=True,
     )
-    if target is not None and value is not None and not pd.isna(value):
-        ratio = float(value) / float(target) if target else 0
-        st.progress(min(max(ratio, 0), 1))
-
 
 
 def _progress_comparison_chart(items: list[dict], title: str, key: str) -> None:
-    """Show KPI progress as a horizontal percentage-to-target bar chart.
+    """Show grouped bar charts comparing the exact current value with target.
 
-    Numeric KPI cards remain the source of the exact current and target values.
-    This chart normalises KPIs with different units to percentage of target so
-    users can compare how close or far each KPI is from completion.
+    Count KPIs and percentage KPIs are rendered in separate charts so unlike
+    units never share the same axis. Missing source values are omitted rather
+    than treated as zero. Numeric KPI cards above the chart remain visible.
     """
-    rows = []
+    count_rows: list[dict] = []
+    rate_rows: list[dict] = []
+
     for item in items:
         value = item.get("value")
         target = item.get("target")
-        if value is None or target in (None, 0) or pd.isna(value) or pd.isna(target):
+        if value is None or target is None or pd.isna(value) or pd.isna(target):
             continue
         value = float(value)
         target = float(target)
-        progress = (value / target) * 100.0
-        if item.get("percentage", False):
-            current_text = f"{value:.1%}"
-            target_text = f"{target:.0%}"
-        else:
-            decimals = int(item.get("decimals", 0))
-            current_text = f"{value:,.{decimals}f}"
-            target_text = f"{target:,.{decimals}f}"
-        rows.append({
-            "KPI": str(item.get("label", "KPI")),
-            "Progress": progress,
-            "Current": current_text,
-            "Target": target_text,
-            "Display": f"{progress:.1f}%",
-        })
+        label = str(item.get("label", "KPI"))
 
-    if not rows:
-        st.info("No source-backed KPI values are available for progress comparison.")
+        if item.get("percentage", False):
+            rate_rows.extend([
+                {"KPI": label, "Measure": "Current", "Value": value * 100.0},
+                {"KPI": label, "Measure": "Target", "Value": target * 100.0},
+            ])
+        else:
+            count_rows.extend([
+                {"KPI": label, "Measure": "Current", "Value": value},
+                {"KPI": label, "Measure": "Target", "Value": target},
+            ])
+
+    if not count_rows and not rate_rows:
+        st.info("No source-backed KPI values are available for target comparison.")
         return
 
-    chart_df = pd.DataFrame(rows).sort_values("Progress", ascending=True)
-    max_progress = max(110.0, float(chart_df["Progress"].max()) * 1.12)
-    fig = px.bar(
-        chart_df,
-        x="Progress",
-        y="KPI",
-        orientation="h",
-        text="Display",
-        custom_data=["Current", "Target"],
-        title=title,
-    )
-    fig.update_traces(
-        textposition="outside",
-        cliponaxis=False,
-        hovertemplate=(
-            "<b>%{y}</b><br>Current: %{customdata[0]}<br>"
-            "Target: %{customdata[1]}<br>Progress: %{x:.1f}%<extra></extra>"
-        ),
-    )
-    fig.add_vline(x=100, line_dash="dash", annotation_text="Target", annotation_position="top")
-    fig.update_layout(
-        xaxis_title="Progress towards target (%)",
-        yaxis_title="",
-        xaxis_range=[0, max_progress],
-        height=max(340, 58 * len(chart_df) + 130),
-        margin=dict(l=20, r=90, t=70, b=45),
-        showlegend=False,
-    )
-    fig.update_yaxes(automargin=True, tickfont=dict(size=13))
-    st.plotly_chart(fig, use_container_width=True, key=key)
+    if count_rows:
+        count_df = pd.DataFrame(count_rows)
+        order = (count_df[count_df["Measure"] == "Target"]
+                 .sort_values("Value", ascending=True)["KPI"].tolist())
+        count_df["KPI"] = pd.Categorical(count_df["KPI"], categories=order, ordered=True)
+        count_df = count_df.sort_values("KPI")
+        count_df["Label"] = count_df["Value"].map(lambda x: f"{x:,.0f}")
+        fig_counts = px.bar(
+            count_df,
+            x="Value",
+            y="KPI",
+            color="Measure",
+            orientation="h",
+            barmode="group",
+            text="Label",
+            title=f"{title} — counts",
+            category_orders={"Measure": ["Current", "Target"]},
+        )
+        fig_counts.update_traces(
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="<b>%{y}</b><br>%{fullData.name}: %{x:,.0f}<extra></extra>",
+        )
+        fig_counts.update_layout(
+            xaxis_title="Number",
+            yaxis_title="",
+            height=max(390, 72 * len(order) + 150),
+            margin=dict(l=20, r=100, t=80, b=55),
+            legend_title_text="",
+            bargap=0.28,
+            bargroupgap=0.08,
+        )
+        fig_counts.update_yaxes(automargin=True, tickfont=dict(size=13))
+        fig_counts.update_xaxes(rangemode="tozero", gridcolor="rgba(13,43,69,0.10)")
+        st.plotly_chart(fig_counts, use_container_width=True, key=f"{key}_counts")
+
+    if rate_rows:
+        rate_df = pd.DataFrame(rate_rows)
+        order = (rate_df[rate_df["Measure"] == "Target"]
+                 .sort_values("Value", ascending=True)["KPI"].tolist())
+        rate_df["KPI"] = pd.Categorical(rate_df["KPI"], categories=order, ordered=True)
+        rate_df = rate_df.sort_values("KPI")
+        rate_df["Label"] = rate_df["Value"].map(lambda x: f"{x:.1f}%")
+        fig_rates = px.bar(
+            rate_df,
+            x="Value",
+            y="KPI",
+            color="Measure",
+            orientation="h",
+            barmode="group",
+            text="Label",
+            title=f"{title} — rates",
+            category_orders={"Measure": ["Current", "Target"]},
+        )
+        max_rate = max(100.0, float(rate_df["Value"].max()) * 1.18)
+        fig_rates.update_traces(
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="<b>%{y}</b><br>%{fullData.name}: %{x:.1f}%<extra></extra>",
+        )
+        fig_rates.update_layout(
+            xaxis_title="Percentage",
+            yaxis_title="",
+            xaxis_range=[0, max_rate],
+            height=max(300, 90 * len(order) + 150),
+            margin=dict(l=20, r=100, t=80, b=55),
+            legend_title_text="",
+            bargap=0.30,
+            bargroupgap=0.08,
+        )
+        fig_rates.update_yaxes(automargin=True, tickfont=dict(size=13))
+        fig_rates.update_xaxes(ticksuffix="%", gridcolor="rgba(13,43,69,0.10)")
+        st.plotly_chart(fig_rates, use_container_width=True, key=f"{key}_rates")
 
 def _header(title: str, subtitle: str) -> None:
     st.markdown(
@@ -1686,7 +1724,7 @@ def render_april_page(template_path: Path | None = None) -> None:
     with c7:
         _metric_card("Unique seniors tracked", result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
 
-    st.markdown("### Official KPI progress comparison")
+    st.markdown("### Current versus target bar charts")
     _progress_comparison_chart([
         {"label": "Seniors onboarded", "value": result.totals.get("seniors_onboarded"), "target": 1000},
         {"label": "Risk validation rate", "value": result.totals.get("official_risk_validation_rate"), "target": 0.80, "percentage": True},
@@ -1695,7 +1733,7 @@ def render_april_page(template_path: Path | None = None) -> None:
         {"label": "Volunteers reached", "value": result.totals.get("volunteers_reached_annual"), "target": 100},
         {"label": "Caregivers reached", "value": result.totals.get("caregivers_reached_annual"), "target": 200},
         {"label": "Unique seniors tracked", "value": result.totals.get("unique_tracked_seniors_3_year"), "target": 300},
-    ], "APRIL progress towards official targets", "april_official_progress")
+    ], "APRIL current versus official targets", "april_official_progress")
 
     st.markdown("## Risk-flag validation audit")
     r1, r2, r3 = st.columns(3)
@@ -1730,7 +1768,7 @@ def render_april_page(template_path: Path | None = None) -> None:
         {"label": "Volunteer instances", "value": result.totals.get("volunteer_instances_3_year"), "target": 300},
         {"label": "Caregiver instances", "value": result.totals.get("caregiver_instances_3_year"), "target": 600},
         {"label": "Total beneficiary instances", "value": result.totals.get("total_beneficiary_instances_3_year"), "target": 3900},
-    ], "APRIL three-year beneficiary progress", "april_beneficiary_progress")
+    ], "APRIL three-year beneficiary current versus target", "april_beneficiary_progress")
 
     st.markdown("## Annual assessment coverage")
     a1, a2, a3 = st.columns(3)
@@ -1804,7 +1842,7 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
     with c5: _metric_card("Complete assessment sets", result.totals.get("complete_assessment_sets_annual"), 100, note=f"{reporting_year}")
     with c6: _metric_card("Unique seniors tracked", result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
 
-    st.markdown("### Official KPI progress comparison")
+    st.markdown("### Current versus target bar charts")
     _progress_comparison_chart([
         {"label": "Total participating seniors", "value": result.totals.get("participating_seniors"), "target": 1000},
         {"label": "GLOW Bukit Batok participants", "value": float(bb.iloc[0]) if not bb.empty else None, "target": 500},
@@ -1812,7 +1850,7 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         {"label": "Improve / maintain rate", "value": result.totals.get("official_outcome_rate"), "target": 0.60, "percentage": True},
         {"label": "Complete assessment sets", "value": result.totals.get("complete_assessment_sets_annual"), "target": 100},
         {"label": "Unique seniors tracked", "value": result.totals.get("unique_tracked_seniors_3_year"), "target": 300},
-    ], "L’Harmoni progress towards official targets", "lharmoni_official_progress")
+    ], "L’Harmoni current versus official targets", "lharmoni_official_progress")
 
     st.markdown("## One-year outcome completeness")
     o1, o2, o3 = st.columns(3)

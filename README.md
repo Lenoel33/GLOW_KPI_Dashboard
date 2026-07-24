@@ -105,9 +105,14 @@ A final human reconciliation against the source system remains mandatory before 
 ## KPI card readability update
 - Project APRIL and L'Harmoni KPI cards now use responsive HTML cards instead of Streamlit's fixed metric component.
 - Long KPI names, values, targets and explanatory notes wrap fully instead of being clipped.
-- Cards expand vertically, use responsive font sizes, and retain progress bars.
+- Cards expand vertically, use responsive font sizes, and use current-versus-target bar charts.
 - This update does not change KPI formulas, centre scope, file extraction or the original Centre Dashboard functionality.
 
 ## KPI card spacing update
 
 The APRIL and L'Harmoni pages now use a maximum of three KPI cards per row. Six-card and four-card sections are split across multiple rows, with larger horizontal and vertical gaps, wider minimum card widths, wrapped titles, and responsive stacking on smaller screens. This prevents labels such as “Pending review” and “Review coverage” from being shortened with ellipses.
+
+
+## KPI comparison charts
+
+The APRIL and L’Harmoni pages use grouped horizontal bar charts with separate Current and Target bars. Count KPIs and percentage KPIs are placed in separate charts so unlike units never share an axis. Missing values are omitted rather than shown as zero.
