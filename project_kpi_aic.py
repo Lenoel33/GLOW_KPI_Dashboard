@@ -1944,11 +1944,30 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         return
 
     frames = []
-    for t in tables:
-        frame = t.data.copy()
-        frame["_source_file"] = t.source_file
-        frame["_source_sheet"] = t.source_sheet
+    for table in tables:
+        # SourceTable stores the parsed DataFrame in ``frame``.  Earlier builds
+        # incorrectly referenced ``data``, causing an AttributeError after upload.
+        # The fallback keeps this compatible with any older table-like objects.
+        source_frame = getattr(table, "frame", None)
+        if source_frame is None:
+            source_frame = getattr(table, "data", None)
+        if not isinstance(source_frame, pd.DataFrame):
+            file_errors.append(
+                f"{getattr(table, 'source_file', 'Uploaded file')}: readable table data was not available."
+            )
+            continue
+
+        frame = source_frame.copy()
+        frame["_source_file"] = getattr(table, "source_file", "Uploaded file")
+        frame["_source_sheet"] = getattr(table, "source_sheet", "Unknown sheet")
         frames.append(frame)
+
+    if not frames:
+        st.error("No usable table data were found in the uploaded files.")
+        if file_errors:
+            for message in file_errors:
+                st.warning(message)
+        return
     df = pd.concat(frames, ignore_index=True, sort=False)
 
     def _normalise_header(value: object) -> str:
