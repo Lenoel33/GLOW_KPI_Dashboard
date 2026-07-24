@@ -37,6 +37,58 @@ st.set_page_config(
 px.defaults.template = "plotly_white"
 px.defaults.color_discrete_sequence = ["#C45D2D", "#0D2B45", "#6F9CA3", "#D9B27D", "#55623B"]
 
+
+# -----------------------------------------------------------------------------
+# Dashboard data clearing helpers
+# -----------------------------------------------------------------------------
+PRESERVED_SESSION_KEYS = {"dashboard_page_sidebar"}
+
+
+def _clear_session_data(prefixes=(), exact_keys=()):
+    """Clear selected Streamlit session data while preserving navigation."""
+    for key in list(st.session_state.keys()):
+        if key in PRESERVED_SESSION_KEYS:
+            continue
+        if key in exact_keys or any(str(key).startswith(prefix) for prefix in prefixes):
+            st.session_state.pop(key, None)
+
+
+def clear_centre_dashboard_data():
+    reset_counter = int(st.session_state.get("upload_reset_counter", 0)) + 1
+    _clear_session_data(
+        prefixes=("centre_", "attendance_", "member_", "activity_", "programme_",
+                  "dashboard_", "mapping_", "fallback_", "kpi_", "uploaded_"),
+        exact_keys=("dashboard_ready", "dashboard_file_id", "confirm_clear_all"),
+    )
+    st.session_state["upload_reset_counter"] = reset_counter
+    try:
+        if ANON_STORE_PATH.exists():
+            ANON_STORE_PATH.unlink()
+    except OSError as exc:
+        st.warning(f"Data was cleared, but the saved aggregate snapshot could not be removed: {exc}")
+    st.cache_data.clear()
+    st.rerun()
+
+
+def clear_all_dashboard_data():
+    centre_counter = int(st.session_state.get("upload_reset_counter", 0)) + 1
+    april_counter = int(st.session_state.get("april_upload_reset_counter", 0)) + 1
+    lharmoni_counter = int(st.session_state.get("lharmoni_upload_reset_counter", 0)) + 1
+    current_page = st.session_state.get("dashboard_page_sidebar", "Centre Dashboard")
+    for key in list(st.session_state.keys()):
+        st.session_state.pop(key, None)
+    st.session_state["dashboard_page_sidebar"] = current_page
+    st.session_state["upload_reset_counter"] = centre_counter
+    st.session_state["april_upload_reset_counter"] = april_counter
+    st.session_state["lharmoni_upload_reset_counter"] = lharmoni_counter
+    try:
+        if ANON_STORE_PATH.exists():
+            ANON_STORE_PATH.unlink()
+    except OSError as exc:
+        st.warning(f"Data was cleared, but the saved aggregate snapshot could not be removed: {exc}")
+    st.cache_data.clear()
+    st.rerun()
+
 st.markdown(
     """
     <style>
@@ -200,10 +252,10 @@ with st.sidebar:
 
 PROJECT_TEMPLATE_PATH = APP_DIR / "AIC_Project_KPI_Input_Template.xlsx"
 if dashboard_page == "Project APRIL":
-    render_april_page(PROJECT_TEMPLATE_PATH)
+    render_april_page(PROJECT_TEMPLATE_PATH, clear_all_callback=clear_all_dashboard_data)
     st.stop()
 elif dashboard_page == "L’Harmoni — Combined GLOW KPIs":
-    render_lharmoni_page(PROJECT_TEMPLATE_PATH)
+    render_lharmoni_page(PROJECT_TEMPLATE_PATH, clear_all_callback=clear_all_dashboard_data)
     st.stop()
 
 st.markdown(
@@ -947,11 +999,32 @@ with st.sidebar:
     if "upload_reset_counter" not in st.session_state:
         st.session_state["upload_reset_counter"] = 0
 
-    if st.button("🧹 Clear uploaded data", use_container_width=True, help="Clears the current upload widgets so your next workbook will not mix with the previous one."):
-        st.session_state["upload_reset_counter"] += 1
-        st.session_state["dashboard_ready"] = False
-        st.session_state.pop("dashboard_file_id", None)
-        st.rerun()
+    clear_current_col, clear_all_col = st.columns(2)
+    with clear_current_col:
+        if st.button(
+            "🧹 Clear Centre Data",
+            use_container_width=True,
+            help="Clears Centre Dashboard uploads, mappings, calculations and the saved aggregate snapshot.",
+        ):
+            clear_centre_dashboard_data()
+    with clear_all_col:
+        if st.button(
+            "⚠️ Clear All KPI Data",
+            use_container_width=True,
+            help="Clears Centre Dashboard, APRIL and L’Harmoni data.",
+        ):
+            st.session_state["confirm_clear_all"] = True
+
+    if st.session_state.get("confirm_clear_all", False):
+        st.warning("This will clear all Centre Dashboard, APRIL and L’Harmoni data.")
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
+            if st.button("Confirm Clear All", type="primary", use_container_width=True):
+                clear_all_dashboard_data()
+        with cancel_col:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state["confirm_clear_all"] = False
+                st.rerun()
 
     activity_type_filter = st.selectbox("Programme Type", ["All", "One-Time", "Recurring"])
     st.divider()
