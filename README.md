@@ -107,3 +107,7 @@ A final human reconciliation against the source system remains mandatory before 
 - Long KPI names, values, targets and explanatory notes wrap fully instead of being clipped.
 - Cards expand vertically, use responsive font sizes, and retain progress bars.
 - This update does not change KPI formulas, centre scope, file extraction or the original Centre Dashboard functionality.
+
+## KPI card spacing update
+
+The APRIL and L'Harmoni pages now use a maximum of three KPI cards per row. Six-card and four-card sections are split across multiple rows, with larger horizontal and vertical gaps, wider minimum card widths, wrapped titles, and responsive stacking on smaller screens. This prevents labels such as “Pending review” and “Review coverage” from being shortened with ellipses.

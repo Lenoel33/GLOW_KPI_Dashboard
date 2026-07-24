@@ -1439,9 +1439,36 @@ def _inject_metric_card_css() -> None:
             overflow-wrap: anywhere;
         }
         div[data-testid="column"] { min-width: 0; }
+        div[data-testid="stHorizontalBlock"] {
+            gap: 2rem !important;
+            align-items: stretch !important;
+            margin-bottom: 1.25rem !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            flex: 1 1 300px !important;
+            min-width: 280px !important;
+        }
+        @media (max-width: 1100px) {
+            div[data-testid="stHorizontalBlock"] { gap: 1.5rem !important; }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] { min-width: 260px !important; }
+        }
         @media (max-width: 900px) {
-            .aic-kpi-card { min-height: 156px; padding: 16px; }
+            .aic-kpi-card { min-height: 156px; padding: 18px; }
             .aic-kpi-label { min-height: auto; }
+            div[data-testid="stHorizontalBlock"] {
+                flex-wrap: wrap !important;
+                gap: 1.25rem !important;
+            }
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex: 1 1 calc(50% - 1.25rem) !important;
+                min-width: 240px !important;
+            }
+        }
+        @media (max-width: 640px) {
+            div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                flex-basis: 100% !important;
+                min-width: 100% !important;
+            }
         }
         </style>
         """,
@@ -1581,21 +1608,23 @@ def render_april_page(template_path: Path | None = None) -> None:
         _metric_card("Official risk validation rate", result.totals.get("official_risk_validation_rate"), 0.80, True, "Validated flagged seniors ÷ all APRIL-flagged seniors")
     with c3:
         _metric_card("Complete assessment sets", result.totals.get("complete_assessment_sets_annual"), 100, note=f"MMSE + GDS + SPPB in one dated episode, {reporting_year}")
-    c4, c5, c6, c7 = st.columns(4)
+    c4, c5, c6 = st.columns(3)
     with c4:
         _metric_card("AAC clients reached", result.totals.get("aac_clients_reached_annual"), 1000, note=str(reporting_year))
     with c5:
         _metric_card("Volunteers reached", result.totals.get("volunteers_reached_annual"), 100, note=str(reporting_year))
     with c6:
         _metric_card("Caregivers reached", result.totals.get("caregivers_reached_annual"), 200, note=str(reporting_year))
+    c7, _, _ = st.columns(3)
     with c7:
         _metric_card("Unique seniors tracked", result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
 
     st.markdown("## Risk-flag validation audit")
-    r1, r2, r3, r4, r5, r6 = st.columns(6)
+    r1, r2, r3 = st.columns(3)
     with r1: _metric_card("All seniors flagged", result.totals.get("risk_flags_total"))
     with r2: _metric_card("Reviewed by staff", result.totals.get("risk_flags_reviewed"))
     with r3: _metric_card("Validated as recorded", result.totals.get("risk_flags_validated_recorded"), note="Before assessment-evidence check")
+    r4, r5, r6 = st.columns(3)
     with r4: _metric_card("Validated with assessment evidence", result.totals.get("risk_flags_validated"))
     with r5: _metric_card("Pending review", result.totals.get("risk_flags_pending_review"))
     with r6: _metric_card("Review coverage", result.totals.get("risk_review_coverage"), percentage=True)
@@ -1611,25 +1640,28 @@ def render_april_page(template_path: Path | None = None) -> None:
     st.dataframe(display, use_container_width=True, hide_index=True)
 
     st.markdown("## Three-year beneficiary-table commitment")
-    b1, b2, b3, b4 = st.columns(4)
+    b1, b2, b3 = st.columns(3)
     with b1: _metric_card("AAC client instances", result.totals.get("aac_client_instances_3_year"), 3000, note=f"{project_start_year}–{project_start_year+2}")
     with b2: _metric_card("Volunteer instances", result.totals.get("volunteer_instances_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
     with b3: _metric_card("Caregiver instances", result.totals.get("caregiver_instances_3_year"), 600, note=f"{project_start_year}–{project_start_year+2}")
+    b4, _, _ = st.columns(3)
     with b4: _metric_card("Total beneficiary instances", result.totals.get("total_beneficiary_instances_3_year"), 3900, note="Application beneficiary-table total")
 
     st.markdown("## Annual assessment coverage")
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2, a3 = st.columns(3)
     with a1: _metric_card("MMSE completed", result.totals.get("mmse_completed_annual"))
     with a2: _metric_card("GDS completed", result.totals.get("gds_completed_annual"))
     with a3: _metric_card("SPPB completed", result.totals.get("sppb_completed_annual"))
+    a4, _, _ = st.columns(3)
     with a4: _metric_card("All three completed", result.totals.get("complete_assessment_sets_annual"), 100)
 
     st.markdown("## Application evaluation measures")
-    s1, s2, s3, s4 = st.columns(4)
+    s1, s2, s3 = st.columns(3)
     with s1: _metric_card("APRIL interactions", result.supplementary.get("april_interactions_annual"), note=str(reporting_year))
     with s2: _metric_card("Unique APRIL users", result.supplementary.get("unique_active_april_users_annual"), note=str(reporting_year))
     with s3:
         _metric_card("Staff hours saved", result.supplementary.get("total_staff_hours_saved"), decimals=1)
+    s4, _, _ = st.columns(3)
     with s4:
         _metric_card("Average satisfaction rating", result.supplementary.get("average_satisfaction_rating"), decimals=2)
     if result.supplementary.get("explicit_satisfaction_rate") is not None:
@@ -1688,10 +1720,11 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
     with c6: _metric_card("Unique seniors tracked", result.totals.get("unique_tracked_seniors_3_year"), 300, note=f"{project_start_year}–{project_start_year+2}")
 
     st.markdown("## One-year outcome completeness")
-    o1, o2, o3, o4 = st.columns(4)
+    o1, o2, o3 = st.columns(3)
     with o1: _metric_card("Tracked seniors due", result.totals.get("tracked_seniors_due"))
     with o2: _metric_card("Valid one-year outcomes", result.totals.get("outcome_eligible_seniors"))
     with o3: _metric_card("Improved / maintained", result.totals.get("improved_or_maintained_seniors"))
+    o4, _, _ = st.columns(3)
     with o4: _metric_card("Assessment coverage", result.totals.get("one_year_assessment_coverage"), percentage=True)
     st.caption("Completed-assessment outcome rate (supporting only): " + _fmt_pct(result.totals.get("completed_assessment_outcome_rate")))
 
@@ -1718,10 +1751,11 @@ def render_lharmoni_page(template_path: Path | None = None) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("## Annual assessment coverage")
-    a1, a2, a3, a4 = st.columns(4)
+    a1, a2, a3 = st.columns(3)
     with a1: _metric_card("MMSE completed", result.totals.get("mmse_completed_annual"))
     with a2: _metric_card("GDS completed", result.totals.get("gds_completed_annual"))
     with a3: _metric_card("SPPB completed", result.totals.get("sppb_completed_annual"))
+    a4, _, _ = st.columns(3)
     with a4: _metric_card("All three completed", result.totals.get("complete_assessment_sets_annual"), 100)
 
     st.markdown("## Programme fidelity and continuity monitoring")
