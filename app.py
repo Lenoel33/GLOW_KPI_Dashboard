@@ -192,7 +192,7 @@ with st.sidebar:
     st.markdown("## Dashboard Pages")
     dashboard_page = st.radio(
         "Dashboard Pages",
-        ["Centre Dashboard", "Project APRIL", "Project L’Harmoni"],
+        ["Centre Dashboard", "Project APRIL", "L’Harmoni — Combined GLOW KPIs"],
         label_visibility="collapsed",
         key="dashboard_page_sidebar",
     )
@@ -202,7 +202,7 @@ PROJECT_TEMPLATE_PATH = APP_DIR / "AIC_Project_KPI_Input_Template.xlsx"
 if dashboard_page == "Project APRIL":
     render_april_page(PROJECT_TEMPLATE_PATH)
     st.stop()
-elif dashboard_page == "Project L’Harmoni":
+elif dashboard_page == "L’Harmoni — Combined GLOW KPIs":
     render_lharmoni_page(PROJECT_TEMPLATE_PATH)
     st.stop()
 
