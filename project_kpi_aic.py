@@ -1990,12 +1990,8 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
     _header("L’Harmoni — Combined GLOW KPI Dashboard", "Combined operational attendance KPIs for GLOW Bukit Batok and GLOW Nanyang.")
     _project_clear_controls("LHARMONI", clear_all_callback)
     st.info("Centre classification follows the Centres field: values containing Bukit Batok are assigned to GLOW Bukit Batok, and values containing Nanyang are assigned to GLOW Nanyang.")
-    with st.expander("All AIC/CST L’Harmoni indicators reflected in this dashboard", expanded=True):
-        _targets_table("LHARMONI")
-        st.caption(
-            "The dashboard also includes the application implementation milestones and supporting assessment-completeness measures. "
-            "Attendance-derived figures and formal outcome-study figures are shown separately so they are not confused."
-        )
+    with st.expander("AIC/CST numerical indicators available from the attendance source", expanded=True):
+        st.caption("Participant counts use unique cleaned names. Centre counts use the Centres field according to the organisation rule.")
     if template_path and template_path.exists():
         st.download_button("Download controlled AIC project data template", template_path.read_bytes(), file_name=template_path.name, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     lharmoni_reset = int(st.session_state.get("lharmoni_upload_reset_counter", 0))
@@ -2009,119 +2005,6 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
         for message in file_errors:
             st.warning(message)
         return
-
-    reporting_year, project_start_year = _year_and_start_controls(tables, "lharmoni")
-    st.markdown("### Official one-year outcome settings")
-    oc1, oc2, oc3 = st.columns(3)
-    with oc1:
-        followup_min_days = st.number_input(
-            "Minimum follow-up days", min_value=1, max_value=730, value=335, step=1,
-            key="lharmoni_followup_min_days",
-        )
-    with oc2:
-        followup_max_days = st.number_input(
-            "Maximum follow-up days", min_value=1, max_value=730, value=395, step=1,
-            key="lharmoni_followup_max_days",
-        )
-    with oc3:
-        data_cutoff = st.date_input(
-            "Data cut-off date", value=pd.Timestamp.today().date(),
-            key="lharmoni_data_cutoff",
-        )
-    timing_rule_approved = st.checkbox(
-        "Approve this follow-up window for the official one-year outcome denominator",
-        value=False,
-        key="lharmoni_timing_rule_approved",
-        help="The official 60% KPI remains unavailable until the reporting team approves the timing rule.",
-    )
-    raw_score_rule_approved = st.checkbox(
-        "Approve score-direction rules when only raw MMSE, GDS and SPPB scores are supplied",
-        value=False,
-        key="lharmoni_raw_score_rule_approved",
-        help="Use only after confirming that higher MMSE/SPPB and lower GDS represent maintenance or improvement for the approved reporting method.",
-    )
-
-    official_result = analyse_lharmoni(
-        tables,
-        reporting_year,
-        project_start_year,
-        int(followup_min_days),
-        int(followup_max_days),
-        bool(timing_rule_approved),
-        bool(raw_score_rule_approved),
-        pd.Timestamp(data_cutoff),
-    )
-
-    st.markdown("## Official AIC/CST L’Harmoni indicators")
-    o1, o2, o3 = st.columns(3)
-    with o1:
-        _metric_card("Participating seniors", official_result.totals.get("participating_seniors"), 1000, note="Cumulative project total")
-    with o2:
-        bb_series = official_result.centre_summary.loc[official_result.centre_summary["centre"] == "GLOW Bukit Batok", "participating_seniors"].dropna()
-        bb_official = float(bb_series.iloc[0]) if not bb_series.empty else None
-        _metric_card("GLOW Bukit Batok participants", bb_official, 500)
-    with o3:
-        ny_series = official_result.centre_summary.loc[official_result.centre_summary["centre"] == "GLOW Nanyang", "participating_seniors"].dropna()
-        ny_official = float(ny_series.iloc[0]) if not ny_series.empty else None
-        _metric_card("GLOW Nanyang participants", ny_official, 500)
-    o4, o5, o6 = st.columns(3)
-    with o4:
-        _metric_card(
-            "Improved or maintained at one year",
-            official_result.totals.get("official_outcome_rate"),
-            0.60,
-            percentage=True,
-            note="Physical and/or cognitive wellbeing",
-        )
-    with o5:
-        _metric_card(
-            "Complete MMSE/GDS/SPPB sets",
-            official_result.totals.get("complete_assessment_sets_annual"),
-            100,
-            note=str(reporting_year),
-        )
-    with o6:
-        _metric_card(
-            "Unique seniors tracked",
-            official_result.totals.get("unique_tracked_seniors_3_year"),
-            300,
-            note=f"{project_start_year}–{project_start_year + 2}",
-        )
-
-    _progress_comparison_chart([
-        {"label": "Participating seniors", "value": official_result.totals.get("participating_seniors"), "target": 1000},
-        {"label": "GLOW Bukit Batok participants", "value": bb_official, "target": 500},
-        {"label": "GLOW Nanyang participants", "value": ny_official, "target": 500},
-        {"label": "One-year improved or maintained", "value": official_result.totals.get("official_outcome_rate"), "target": 0.60, "percentage": True},
-        {"label": "Complete assessment sets", "value": official_result.totals.get("complete_assessment_sets_annual"), "target": 100},
-        {"label": "Unique seniors tracked", "value": official_result.totals.get("unique_tracked_seniors_3_year"), "target": 300},
-    ], "L’Harmoni current versus official targets", "lharmoni_official_progress")
-
-    st.markdown("## One-year outcome audit")
-    u1, u2, u3 = st.columns(3)
-    with u1:
-        _metric_card("Tracked seniors due", official_result.totals.get("tracked_seniors_due"))
-    with u2:
-        _metric_card("Valid paired outcomes", official_result.totals.get("outcome_eligible_seniors"))
-    with u3:
-        _metric_card("Improved or maintained seniors", official_result.totals.get("improved_or_maintained_seniors"))
-    u4, u5, _ = st.columns(3)
-    with u4:
-        _metric_card("One-year assessment coverage", official_result.totals.get("one_year_assessment_coverage"), percentage=True)
-    with u5:
-        _metric_card("Completed-assessment outcome rate", official_result.totals.get("completed_assessment_outcome_rate"), percentage=True, note="Supporting measure only")
-
-    st.markdown("## Annual assessment coverage")
-    a1, a2, a3 = st.columns(3)
-    with a1:
-        _metric_card("MMSE completed", official_result.totals.get("mmse_completed_annual"))
-    with a2:
-        _metric_card("GDS completed", official_result.totals.get("gds_completed_annual"))
-    with a3:
-        _metric_card("SPPB completed", official_result.totals.get("sppb_completed_annual"))
-
-    st.markdown("## L’Harmoni implementation milestones")
-    st.dataframe(official_result.milestone_summary, use_container_width=True, hide_index=True)
 
     combined = analyse_lharmoni_combined_tables(tables)
     file_errors = list(file_errors) + list(combined.get("errors", []))
@@ -2175,8 +2058,7 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
     bb_value = centre_participants("GLOW Bukit Batok")
     ny_value = centre_participants("GLOW Nanyang")
 
-    st.markdown("## Attendance-derived participation indicators")
-    st.caption("These operational figures are derived from attended rows and are shown separately from explicit L’Harmoni enrolment and assessment evidence.")
+    st.markdown("## AIC/CST numerical indicators available from the attendance source")
     card_items = [
         ("Total participating seniors", total_unique, 1000),
         ("GLOW Bukit Batok participants", bb_value, 500),
@@ -2290,10 +2172,7 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
             st.dataframe(vc, use_container_width=True, hide_index=True)
             st.plotly_chart(px.bar(vc, x=title, y="Count", title=title, text_auto=True), use_container_width=True)
 
-    _messages(official_result, file_errors)
-    _audit_tabs(official_result)
-
-    st.markdown("## Operational attendance source and field audit")
+    st.markdown("## Source and field audit")
     audit = pd.DataFrame({
         "Required concept": [
             "Centre", "Attendance status", "Senior identifier", "Activity", "Session/date",
