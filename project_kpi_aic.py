@@ -104,7 +104,7 @@ ALIASES: dict[str, list[str]] = {
     "record_date": ["date", "record date", "activity date", "session date", "engagement date", "created on", "created date"],
     "person_id": ["senior id", "client id", "member id", "participant id", "beneficiary id", "user id", "person id", "staff id", "resident id", "case id", "masked nric", "id number"],
     "person_name": ["senior name", "client name", "member name", "participant name", "beneficiary name", "resident name", "full name", "name"],
-    "beneficiary_type": ["beneficiary type", "participant type", "person type", "client type", "role", "stakeholder type", "category"],
+    "beneficiary_type": ["beneficiary type", "participant type", "person type", "client type", "role", "stakeholder type", "category", "participant category"],
     "source_reference": ["source reference", "source", "evidence", "evidence reference", "file reference", "record source"],
     "prepared_by": ["prepared by", "data prepared by"],
     "reviewed_by": ["reviewed by", "verified by", "approved by", "reviewer"],
@@ -114,7 +114,7 @@ ALIASES: dict[str, list[str]] = {
     "risk_flags_reviewed": ["risk flags reviewed", "flags reviewed", "reviewed risk flags", "at risk seniors reviewed", "flagged seniors reviewed"],
     "risk_flags_validated": ["risk flags validated", "validated risk flags", "validated flags", "at risk seniors validated", "flagged seniors validated"],
     "complete_assessment_sets_annual": ["complete assessment sets annual", "annual complete assessment sets", "complete mmse gds sppb sets", "mmse gds sppb completed", "complete assessments annual", "annual assessment cohort"],
-    "unique_tracked_seniors_3_year": ["unique tracked seniors 3 year", "unique seniors tracked 3 years", "three year tracked seniors", "3 year tracked seniors", "unique tracked seniors", "tracked for assessments", "three year tracking flag"],
+    "unique_tracked_seniors_3_year": ["unique tracked seniors 3 year", "unique seniors tracked 3 years", "three year tracked seniors", "3 year tracked seniors", "unique tracked seniors"],
     "aac_clients_reached_annual": ["aac clients reached annual", "annual aac clients reached", "aac clients reached", "annual clients reached"],
     "volunteers_reached_annual": ["volunteers reached annual", "annual volunteers reached", "volunteers reached", "annual volunteers"],
     "caregivers_reached_annual": ["caregivers reached annual", "annual caregivers reached", "caregivers reached", "annual caregivers"],
@@ -123,12 +123,12 @@ ALIASES: dict[str, list[str]] = {
     "caregiver_instances_3_year": ["caregiver beneficiary instances 3 year", "three year caregiver beneficiaries", "caregivers 3 year total", "caregiver instances 3 years"],
     "total_beneficiary_instances_3_year": ["total beneficiary instances 3 year", "total beneficiaries 3 years", "three year total beneficiaries", "total number of beneficiaries"],
     # APRIL raw fields
-    "onboarded": ["onboarded", "onboarding status", "april onboarded", "registered for april", "april user", "april registration status"],
+    "onboarded": ["onboarded", "onboarding status", "april onboarded", "april enrolled", "april enrolment", "registered for april", "april user", "april registration status"],
     "onboarding_date": ["onboarding date", "onboarded date", "april onboarding date", "registration date", "april registration date"],
     "risk_flag_id": ["risk flag id", "flag id", "alert id", "risk id"],
     "risk_flagged": ["risk flagged", "at risk", "risk flag", "flagged", "april risk flag", "risk status"],
     "risk_reviewed": ["reviewed by staff", "staff reviewed", "risk reviewed", "review status", "flag reviewed"],
-    "risk_validated": ["validated as risk", "validated", "risk validated", "staff validation", "validated by staff"],
+    "risk_validated": ["validated as risk", "validated", "risk validated", "risk flag validated", "staff validation", "validated by staff"],
     "validation_outcome": ["validation outcome", "review outcome", "risk outcome", "staff assessment outcome", "validation status"],
     "validation_assessment_type": ["validation assessment type", "staff assessment type", "assessment used for validation", "validation tool", "validation instrument"],
     "review_date": ["review date", "staff review date", "validation date"],
@@ -165,8 +165,7 @@ ALIASES: dict[str, list[str]] = {
     "cognitive_outcome": ["cognitive outcome", "cognitive wellbeing outcome", "mmse outcome", "cognitive change"],
     "outcome_domain": ["outcome domain", "wellbeing domain", "domain"],
     "outcome_classification": ["outcome classification", "overall outcome", "outcome", "change category", "result classification", "wellbeing outcome"],
-    "outcome_approved": ["outcome approved", "approved outcome", "classification approved", "reviewed outcome", "approved", "approved one year outcome", "verified outcome"],
-    "outcome_success": ["outcome successful", "successful outcome", "improved maintained flag", "outcome met", "successful one year outcome"],
+    "outcome_approved": ["outcome approved", "approved outcome", "classification approved", "reviewed outcome", "approved"],
     "outcome_rule_version": ["outcome rule version", "rule version", "classification rule", "outcome definition version"],
     "baseline_mmse": ["baseline mmse", "pre mmse", "mmse pre", "pre mmse score"],
     "followup_mmse": ["followup mmse", "post mmse", "mmse post", "post mmse score"],
@@ -220,25 +219,13 @@ def _match_column(columns: Iterable[Any], canonical: str) -> str | None:
     for col, compact in normalized.items():
         if compact in expected:
             return col
-    # Conservative partial matching supports harmless prefixes/suffixes such
-    # as "Extra", "Field", "Value" and mild template wording changes.
-    generic_suffixes = ("extra", "field", "value", "column", "data")
+    # Conservative partial match: the source header may add a suffix, but a
+    # short source header must never match a longer controlled field.
     for col, compact in normalized.items():
         if len(compact) < 6:
             continue
-        stripped = compact
-        for suffix in generic_suffixes:
-            if stripped.endswith(suffix) and len(stripped) - len(suffix) >= 6:
-                stripped = stripped[:-len(suffix)]
-                break
         for alias in expected:
-            if len(alias) < 6:
-                continue
-            if stripped == alias or stripped.startswith(alias) or alias.startswith(stripped):
-                return col
-            # Accept aliases embedded in longer descriptive headers only when
-            # the alias is sufficiently specific to avoid matching "date" or "name".
-            if len(alias) >= 10 and alias in stripped:
+            if len(alias) >= 8 and compact.startswith(alias):
                 return col
     return None
 
@@ -466,8 +453,28 @@ def _project_mask(table: SourceTable, fields: dict[str, str], project: str) -> p
     source_has = token in _compact(f"{table.source_file} {table.source_sheet}")
     if "project" in fields:
         values = table.frame[fields["project"]].apply(_compact)
-        return values.str.contains(token, na=False)
-    return pd.Series(source_has, index=table.frame.index)
+        explicit = values.str.contains(token, na=False)
+        if explicit.any():
+            return explicit
+
+    # Accept a table without a Project column when it contains unmistakable
+    # project-specific fields. This is important for operational exports where
+    # the workbook itself is already dedicated to APRIL or L'Harmoni.
+    if project == "APRIL":
+        april_specific = {
+            "onboarded", "onboarding_date", "risk_flag_id", "risk_flagged",
+            "risk_reviewed", "risk_validated", "validation_outcome",
+            "validation_assessment_type", "april_module", "interaction_id",
+        }
+        inferred = source_has or bool(april_specific.intersection(fields))
+    else:
+        lharmoni_specific = {
+            "enrolment_date", "participant_status", "baseline_date",
+            "followup_date", "physical_outcome", "cognitive_outcome",
+            "outcome_classification", "lharmoni_track",
+        }
+        inferred = source_has or bool(lharmoni_specific.intersection(fields))
+    return pd.Series(inferred, index=table.frame.index)
 
 
 def _numeric(frame: pd.DataFrame, col: str | None) -> pd.Series:
@@ -598,19 +605,11 @@ def _assessment_records(
     annual_complete_by_centre: dict[str, set[str]] = {}
     annual_instrument_by_centre: dict[str, dict[str, set[str]]] = {}
     tracked_by_centre: dict[str, set[str]] = {}
-    tracked_reporting_window_by_centre: dict[str, set[str]] = {}
     long_rows: list[dict[str, Any]] = []
     wide_rows: list[dict[str, Any]] = []
     instrument_evidence = {"mmse": False, "gds": False, "sppb": False}
     any_assessment_evidence = False
-    # Evaluate both the configured three-year project window and the rolling
-    # three reporting years. Some source workbooks label cohorts by project
-    # start (for example 2025-2027), while others provide the latest completed
-    # three years (for example 2024-2026). The window with stronger source
-    # coverage is used and disclosed through the audit counts.
     start, end = _project_window(project_start_year)
-    reporting_start = pd.Timestamp(year=reporting_year - 2, month=1, day=1)
-    reporting_end = pd.Timestamp(year=reporting_year, month=12, day=31)
 
     for table in tables:
         fields = detect_fields(table.frame)
@@ -638,8 +637,6 @@ def _assessment_records(
                 continue
             if pd.notna(when) and start <= when <= end:
                 tracked_by_centre.setdefault(centre, set()).add(str(entity))
-            if pd.notna(when) and reporting_start <= when <= reporting_end:
-                tracked_reporting_window_by_centre.setdefault(centre, set()).add(str(entity))
             # Wide-format scores.
             present = {
                 instrument: fields.get(instrument) and pd.notna(pd.to_numeric(pd.Series([table.frame.at[idx, fields[instrument]]]), errors="coerce").iloc[0])
@@ -690,11 +687,6 @@ def _assessment_records(
         episode_dates += [r["date"] for r in long_rows if r["centre"] == centre and r["entity"] == entity and str(r["episode"]) == episode]
         if episode_dates and any(int(d.year) == reporting_year for d in episode_dates) and {"mmse", "gds", "sppb"}.issubset(instruments):
             annual_complete_by_centre.setdefault(centre, set()).add(entity)
-
-    configured_total = len(set().union(*tracked_by_centre.values())) if tracked_by_centre else 0
-    reporting_total = len(set().union(*tracked_reporting_window_by_centre.values())) if tracked_reporting_window_by_centre else 0
-    if reporting_total > configured_total:
-        tracked_by_centre = tracked_reporting_window_by_centre
 
     rows = []
     for centre in sorted(allowed_centres):
@@ -978,26 +970,15 @@ def _lharmoni_record_level(
             if "participant_status" in fields:
                 status = _key(table.frame.at[idx, fields["participant_status"]])
                 status_ok = status not in {"cancelled", "duplicate", "error", "not enrolled"}
-            if status_ok and pd.notna(enrolment):
-                # Participation is a cumulative project measure. Do not remove
-                # valid enrolled seniors merely because their enrolment falls
-                # outside the selected assessment-study window.
+            if status_ok and pd.notna(enrolment) and start <= enrolment <= end:
                 participants.setdefault(centre, set()).add(ent)
             elif status_ok and "enrolment_date" not in fields and "participant_status" in fields:
                 # A project-specific participant register may omit dates, but an
                 # assessment/operations table must never create extra participants.
                 participants.setdefault(centre, set()).add(ent)
 
-            # One-year denominator: only seniors in a tracked outcome source
-            # should be counted as due. A general participant register must not
-            # inflate the denominator merely because a participant enrolled over
-            # a year ago.
-            row_is_tracked_outcome = any(name in fields for name in (
-                "physical_outcome", "cognitive_outcome", "outcome_classification",
-                "outcome_approved", "outcome_success", "followup_date",
-                "baseline_mmse", "followup_mmse", "baseline_sppb", "followup_sppb",
-            ))
-            if row_is_tracked_outcome and pd.notna(enrolment) and enrolment + pd.Timedelta(days=365) <= data_cutoff:
+            # One-year denominator: seniors whose one-year point is due by cutoff.
+            if pd.notna(enrolment) and enrolment + pd.Timedelta(days=365) <= data_cutoff:
                 due.setdefault(centre, set()).add(ent)
 
             physical = _normalise_outcome(table.frame.at[idx, fields["physical_outcome"]]) if "physical_outcome" in fields else None
@@ -1027,29 +1008,14 @@ def _lharmoni_record_level(
 
             approved = "outcome_approved" in fields and _truthy(table.frame.at[idx, fields["outcome_approved"]])
             rule_present = "outcome_rule_version" in fields and bool(str(table.frame.at[idx, fields["outcome_rule_version"]]).strip()) and str(table.frame.at[idx, fields["outcome_rule_version"]]).strip().lower() not in {"nan", "none"}
-            explicit_success = None
-            if "outcome_success" in fields:
-                raw_success = table.frame.at[idx, fields["outcome_success"]]
-                if _truthy(raw_success):
-                    explicit_success = True
-                elif _falsey(raw_success):
-                    explicit_success = False
             timing_valid = False
             days_after = None
             if pd.notna(enrolment) and pd.notna(followup):
                 days_after = int((followup - enrolment).days)
                 timing_valid = followup_min_days <= days_after <= followup_max_days
-            # Valid source evidence is sufficient for calculation. The UI
-            # approval checkbox now confirms a custom window; it no longer
-            # suppresses otherwise complete approved records.
-            outcome_classified = (
-                physical in {"Improved", "Maintained", "Declined"}
-                or cognitive in {"Improved", "Maintained", "Declined"}
-                or explicit_success is not None
-            )
-            if approved and rule_present and timing_valid and outcome_classified:
+            if timing_rule_approved and approved and rule_present and timing_valid and (physical in {"Improved", "Maintained", "Declined"} or cognitive in {"Improved", "Maintained", "Declined"}):
                 eligible.setdefault(centre, set()).add(ent)
-                if explicit_success is True or physical in {"Improved", "Maintained"} or cognitive in {"Improved", "Maintained"}:
+                if physical in {"Improved", "Maintained"} or cognitive in {"Improved", "Maintained"}:
                     success.setdefault(centre, set()).add(ent)
                 if physical:
                     physical_outcomes.append({"centre": centre, "entity": ent, "outcome": physical})
@@ -1271,7 +1237,10 @@ def analyse_april(tables: list[SourceTable], reporting_year: int, project_start_
         for centre in APRIL_CENTRES:
             raw_people = set(raw_validated_by_centre.get(centre, set()))
             explicit_people = set(explicit_by_centre.get(centre, set()))
-            official_people = explicit_people
+            assessment_people = set(assessment_sets.get("three_year_tracked", set()))
+            # A validated flag is official when the row names an approved
+            # instrument OR the same senior has MMSE/GDS/SPPB evidence.
+            official_people = explicit_people | (raw_people & assessment_people)
             official_validated_global.update(official_people)
             if raw_people:
                 summary.loc[summary["centre"] == centre, "risk_flags_validated"] = float(len(official_people)) if explicit_people else np.nan
@@ -1381,8 +1350,8 @@ def analyse_lharmoni(
     due = totals.get("tracked_seniors_due")
     eligible = totals.get("outcome_eligible_seniors")
     success = totals.get("improved_or_maintained_seniors")
-    totals["official_outcome_rate"] = success / due if due and success is not None else None
-    totals["one_year_assessment_coverage"] = eligible / due if due and eligible is not None else None
+    totals["official_outcome_rate"] = success / due if timing_rule_approved and due and success is not None else None
+    totals["one_year_assessment_coverage"] = eligible / due if timing_rule_approved and due and eligible is not None else None
     totals["completed_assessment_outcome_rate"] = success / eligible if eligible and success is not None else None
 
     milestone = _milestone_summary(tables, "LHARMONI", LHARMONI_MILESTONES)
@@ -1392,11 +1361,13 @@ def analyse_lharmoni(
         ("1,000 participating seniors", totals.get("participating_seniors"), "Unique explicitly enrolled L'Harmoni seniors across both GLOW centres", True, "Cumulative project measure"),
         ("500 GLOW Bukit Batok participants", float(bb.iloc[0]) if not bb.empty else None, "Unique L'Harmoni participants at GLOW Bukit Batok", True, "Centre target"),
         ("500 GLOW Nanyang participants", float(ny.iloc[0]) if not ny.empty else None, "Unique L'Harmoni participants at GLOW Nanyang", True, "Centre target"),
-        ("60% improve or maintain physical/cognitive scores", totals.get("official_outcome_rate"), "Successful one-year physical/cognitive outcomes ÷ all tracked seniors due for one-year follow-up", True, "Uses approved records within the selected follow-up window"),
+        ("60% improve or maintain physical/cognitive scores", totals.get("official_outcome_rate"), "Successful one-year physical/cognitive outcomes ÷ all tracked seniors due for one-year follow-up", True, "Requires approved one-year timing window"),
         ("One-year assessment coverage", totals.get("one_year_assessment_coverage"), "Valid approved one-year outcomes ÷ tracked seniors due", False, "Supporting completeness measure"),
         ("100 complete assessment sets annually", totals.get("complete_assessment_sets_annual"), "Unique seniors with MMSE, GDS and SPPB in one dated assessment episode", True, "Selected reporting year"),
         ("300 unique seniors tracked over three years", totals.get("unique_tracked_seniors_3_year"), "Unique seniors with assessment evidence across the full three-year project window", True, "Not restricted to the selected reporting year"),
     ])
+    if not timing_rule_approved:
+        warnings.append("The official L’Harmoni 60% outcome KPI is withheld until the one-year follow-up window is approved in the dashboard controls.")
     if not tables:
         errors.append("No readable structured project tables were found.")
     notes = {
@@ -2076,13 +2047,13 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
         ))
         timing_rule_approved = st.checkbox(
             "Approved: use this follow-up window for the official 60% KPI",
-            value=True,
+            value=False,
             key="lharmoni_timing_rule_approved",
-            help="Confirms that the selected follow-up window is the approved reporting window. Complete approved records are calculated automatically.",
+            help="The official outcome rate remains unavailable until the reporting owner approves the timing rule.",
         )
         raw_score_rule_approved = st.checkbox(
             "Approved: interpret raw MMSE, GDS and SPPB score direction",
-            value=True,
+            value=False,
             key="lharmoni_raw_score_rule_approved",
             help="Use only after confirming that higher/lower score direction and maintenance rules match the approved methodology.",
         )
