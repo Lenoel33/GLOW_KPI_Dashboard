@@ -132,6 +132,10 @@ ALIASES: dict[str, list[str]] = {
     "validation_outcome": ["validation outcome", "review outcome", "risk outcome", "staff assessment outcome", "validation status"],
     "validation_assessment_type": ["validation assessment type", "staff assessment type", "assessment used for validation", "validation tool", "validation instrument"],
     "review_date": ["review date", "staff review date", "validation date"],
+    "outcome_monitoring": ["outcome monitoring", "outcome monitored", "monitoring status", "included in outcome monitoring"],
+    "volunteer_engaged": ["volunteer engaged", "volunteer involvement", "supported by volunteer"],
+    "caregiver_engaged": ["caregiver engaged", "caregiver involvement", "caregiver reached"],
+    "followup_completed": ["follow up completed", "followup completed", "follow up status", "followup status"],
     # Assessments
     "assessment_episode_id": ["assessment episode id", "assessment set id", "assessment cycle id", "episode id", "visit id"],
     "assessment_type": ["assessment type", "test type", "instrument", "assessment tool", "tool"],
@@ -210,7 +214,7 @@ class ProjectResult:
     readiness: pd.DataFrame
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-    notes: dict[str, str] = field(default_factory=dict)
+    notes: dict[str, Any] = field(default_factory=dict)
 
 
 def _match_column(columns: Iterable[Any], canonical: str) -> str | None:
@@ -1181,9 +1185,136 @@ def _readiness_table(rows: list[tuple[str, Any, str, bool, str]]) -> pd.DataFram
     return pd.DataFrame(out)
 
 
+
+def _blank_value(value: Any) -> bool:
+    if pd.isna(value):
+        return True
+    return _key(value) in {"", "nan", "none", "null", "na", "n a", "not available", "unknown"}
+
+
+def _build_april_missing_data_audit(tables: list[SourceTable]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Separate incomplete APRIL rows without blocking usable KPI evidence.
+
+    The audit is deliberately row-based. It checks only controlled fields that
+    exist in the source table and applies conditional rules for risk and
+    assessment records. Missing optional fields do not invalidate unrelated
+    APRIL KPIs.
+    """
+    audit_rows: list[dict[str, Any]] = []
+    valid_rows: list[dict[str, Any]] = []
+
+    for table in tables:
+        frame = table.frame.copy()
+        fields = detect_fields(frame)
+        mask = _project_mask(table, fields, "APRIL")
+        if not bool(mask.any()):
+            continue
+        centres = _centre_series(table, fields)
+        entities = _entity_series(frame, fields, [], f"{table.source_file} / {table.source_sheet}")
+
+        for idx in frame.index[mask]:
+            row = frame.loc[idx]
+            reasons: list[str] = []
+            entity = entities.loc[idx] if idx in entities.index else pd.NA
+            centre = centres.loc[idx] if idx in centres.index else None
+
+            if pd.isna(entity) or _blank_value(entity):
+                reasons.append("Missing Senior ID/Name")
+            if centre not in APRIL_CENTRES:
+                raw_centre = row.get(fields.get("centre"), "") if fields.get("centre") else ""
+                reasons.append("Missing or unrecognised Centre" if _blank_value(raw_centre) else f"Unapproved Centre: {raw_centre}")
+
+            # If these controlled columns are supplied, blank values should be
+            # corrected and are shown in the audit table.
+            always_check = {
+                "onboarded": "APRIL Enrolled",
+                "risk_flagged": "Risk Flag",
+            }
+            for canonical, label in always_check.items():
+                col = fields.get(canonical)
+                if col and _blank_value(row.get(col)):
+                    reasons.append(f"Missing {label}")
+
+            flagged = False
+            flag_col = fields.get("risk_flagged")
+            if flag_col and not _blank_value(row.get(flag_col)):
+                flag_text = _key(row.get(flag_col))
+                flagged = _truthy(row.get(flag_col)) or flag_text in {"high", "medium", "moderate", "low", "at risk"}
+            if flagged:
+                for canonical, label in [
+                    ("risk_reviewed", "Risk Review Status"),
+                    ("risk_validated", "Risk Validation Status"),
+                ]:
+                    col = fields.get(canonical)
+                    if col and _blank_value(row.get(col)):
+                        reasons.append(f"Missing {label}")
+
+            assessment_cols = {name: fields.get(name) for name in ("mmse", "gds", "sppb", "assessment_date")}
+            has_any_assessment = any(col and not _blank_value(row.get(col)) for col in assessment_cols.values())
+            if has_any_assessment:
+                for canonical, label in [("mmse", "MMSE"), ("gds", "GDS"), ("sppb", "SPPB"), ("assessment_date", "Assessment Date")]:
+                    col = fields.get(canonical)
+                    if not col or _blank_value(row.get(col)):
+                        reasons.append(f"Missing {label}")
+                date_col = fields.get("assessment_date")
+                if date_col and not _blank_value(row.get(date_col)):
+                    parsed = _parse_date_values(pd.Series([row.get(date_col)])).iloc[0]
+                    if pd.isna(parsed):
+                        reasons.append("Invalid Assessment Date")
+
+            # Audit blank values only for optional workflow columns that are
+            # actually present in the uploaded table.
+            for canonical, label in [
+                ("outcome_monitoring", "Outcome Monitoring"),
+                ("caregiver_engaged", "Caregiver Engagement"),
+                ("followup_completed", "Follow-up Completion"),
+            ]:
+                col = fields.get(canonical)
+                if col and _blank_value(row.get(col)):
+                    reasons.append(f"Missing {label}")
+
+            base = {
+                "Source File": table.source_file,
+                "Source Sheet": table.source_sheet,
+                "Source Row": int(idx) + 2 if isinstance(idx, (int, np.integer)) else str(idx),
+                "Senior ID / Name": "" if pd.isna(entity) else str(entity),
+                "Centre": centre or "",
+            }
+            # Keep useful source values visible for correction.
+            for canonical, label in [
+                ("person_id", "Senior ID"), ("person_name", "Name"),
+                ("onboarded", "APRIL Enrolled"), ("risk_flagged", "Risk Flag"),
+                ("risk_reviewed", "Risk Reviewed"), ("risk_validated", "Risk Validated"),
+                ("mmse", "MMSE"), ("gds", "GDS"), ("sppb", "SPPB"),
+                ("assessment_date", "Assessment Date"),
+                ("outcome_monitoring", "Outcome Monitoring"),
+                ("caregiver_engaged", "Caregiver Engaged"),
+                ("followup_completed", "Follow-up Completed"),
+            ]:
+                col = fields.get(canonical)
+                if col:
+                    base[label] = row.get(col)
+
+            if reasons:
+                base["Audit Status"] = "Needs correction"
+                base["Missing / Invalid Data"] = "; ".join(dict.fromkeys(reasons))
+                base["Issue Count"] = len(dict.fromkeys(reasons))
+                audit_rows.append(base)
+            else:
+                base["Audit Status"] = "Valid"
+                valid_rows.append(base)
+
+    audit = pd.DataFrame(audit_rows)
+    valid = pd.DataFrame(valid_rows)
+    if not audit.empty:
+        audit = audit.sort_values(["Issue Count", "Source File", "Source Sheet", "Source Row"], ascending=[False, True, True, True], kind="stable")
+    return valid.reset_index(drop=True), audit.reset_index(drop=True)
+
+
 def analyse_april(tables: list[SourceTable], reporting_year: int, project_start_year: int = 2025) -> ProjectResult:
     warnings: list[str] = []
     errors: list[str] = []
+    valid_rows, missing_data_audit = _build_april_missing_data_audit(tables)
     record, sets, supplementary = _april_record_level(tables, reporting_year, project_start_year, warnings)
     assessment, assessment_sets, instrument_sets = _assessment_records(tables, "APRIL", reporting_year, project_start_year, set(APRIL_CENTRES), warnings)
     aggregate = _latest_aggregate_values(
@@ -1286,7 +1417,11 @@ def analyse_april(tables: list[SourceTable], reporting_year: int, project_start_
         "APRIL", reporting_year, project_start_year, summary, totals, supplementary, assessment,
         milestone, _source_register(tables), _field_register(tables), readiness, errors,
         list(dict.fromkeys(warnings)),
-        notes={"risk_formula": "Flagged seniors validated with MMSE/GDS/SPPB evidence ÷ all APRIL-flagged seniors"},
+        notes={
+            "risk_formula": "Flagged seniors validated with MMSE/GDS/SPPB evidence ÷ all APRIL-flagged seniors",
+            "valid_rows": valid_rows,
+            "missing_data_audit": missing_data_audit,
+        },
     )
 
 
@@ -1875,6 +2010,40 @@ def render_april_page(template_path: Path | None = None, clear_all_callback=None
 
     st.markdown("## Implementation milestones")
     st.dataframe(result.milestone_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("## Missing-data audit")
+    audit_df = result.notes.get("missing_data_audit", pd.DataFrame())
+    valid_df = result.notes.get("valid_rows", pd.DataFrame())
+    total_rows = len(audit_df) + len(valid_df)
+    q1, q2, q3 = st.columns(3)
+    with q1: _metric_card("APRIL rows checked", total_rows)
+    with q2: _metric_card("Rows ready for KPI use", len(valid_df))
+    with q3: _metric_card("Rows requiring correction", len(audit_df))
+    st.caption("Incomplete rows are kept out of the affected calculations only. They do not cause unrelated APRIL KPIs to become unavailable.")
+    if audit_df.empty:
+        st.success("No missing or invalid APRIL row-level data was detected in the recognised fields.")
+    else:
+        issue_counts = (
+            audit_df["Missing / Invalid Data"].str.split("; ").explode().value_counts()
+            .rename_axis("Issue").reset_index(name="Rows")
+        )
+        st.markdown("### Audit issue summary")
+        st.dataframe(issue_counts, use_container_width=True, hide_index=True)
+        st.markdown("### Rows requiring correction")
+        st.dataframe(audit_df, use_container_width=True, hide_index=True, height=420)
+        st.download_button(
+            "Download APRIL missing-data audit CSV",
+            audit_df.to_csv(index=False).encode("utf-8-sig"),
+            file_name=f"APRIL_missing_data_audit_{reporting_year}.csv",
+            mime="text/csv",
+            key=f"download_april_audit_{reporting_year}",
+        )
+    with st.expander("Rows accepted by the audit", expanded=False):
+        if valid_df.empty:
+            st.caption("No fully complete row-level records were identified.")
+        else:
+            st.dataframe(valid_df, use_container_width=True, hide_index=True, height=350)
+
     _messages(result, file_errors)
     _audit_tabs(result)
 
