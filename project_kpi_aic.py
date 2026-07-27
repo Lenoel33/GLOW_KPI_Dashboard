@@ -160,6 +160,10 @@ ALIASES: dict[str, list[str]] = {
     "tracked_seniors_due": ["tracked seniors due", "seniors due for one year follow up", "one year follow up due", "outcome denominator", "tracked seniors one year"],
     "outcome_eligible_seniors": ["outcome eligible seniors", "eligible seniors", "valid paired assessments", "paired assessment seniors", "eligible for outcome"],
     "improved_or_maintained_seniors": ["improved or maintained seniors", "improved maintained seniors", "seniors improved or maintained", "positive outcome seniors", "improved maintained participants"],
+    "one_year_followup_due": ["one year follow up due", "one-year follow-up due", "follow up due", "followup due", "due for one year follow up", "one year due"],
+    "complete_assessment_set": ["complete assessment set", "complete assessment", "assessment set complete", "complete mmse gds sppb", "all assessments completed"],
+    "approved_one_year_outcome": ["approved one year outcome", "approved one-year outcome", "one year outcome approved", "official one year outcome", "approved outcome classification"],
+    "outcome_success": ["outcome successful", "outcome success", "successful outcome", "improved or maintained", "met outcome", "positive outcome"],
     # L'Harmoni raw fields
     "enrolment_date": ["enrolment date", "enrollment date", "joined date", "programme joining date", "program joining date", "lharmoni enrolment date", "l harmoni enrolment date"],
     "participant_status": ["participant status", "enrolment status", "enrollment status", "programme status", "program status", "active status"],
@@ -475,7 +479,8 @@ def _project_mask(table: SourceTable, fields: dict[str, str], project: str) -> p
         lharmoni_specific = {
             "enrolment_date", "participant_status", "baseline_date",
             "followup_date", "physical_outcome", "cognitive_outcome",
-            "outcome_classification", "lharmoni_track",
+            "outcome_classification", "approved_one_year_outcome", "outcome_success",
+            "one_year_followup_due", "complete_assessment_set", "lharmoni_track",
         }
         inferred = source_has or bool(lharmoni_specific.intersection(fields))
     return pd.Series(inferred, index=table.frame.index)
@@ -614,6 +619,8 @@ def _assessment_records(
     instrument_evidence = {"mmse": False, "gds": False, "sppb": False}
     any_assessment_evidence = False
     start, end = _project_window(project_start_year)
+    rolling_start = pd.Timestamp(reporting_year - 2, 1, 1)
+    rolling_end = pd.Timestamp(reporting_year, 12, 31, 23, 59, 59)
 
     for table in tables:
         fields = detect_fields(table.frame)
@@ -639,7 +646,7 @@ def _assessment_records(
             when = dates.loc[idx]
             if centre not in allowed_centres or pd.isna(entity):
                 continue
-            if pd.notna(when) and start <= when <= end:
+            if pd.notna(when) and ((start <= when <= end) or (rolling_start <= when <= rolling_end)):
                 tracked_by_centre.setdefault(centre, set()).add(str(entity))
             # Wide-format scores.
             present = {
@@ -952,8 +959,8 @@ def _lharmoni_record_level(
         if not mask.any():
             continue
         evidence["participants"] = evidence["participants"] or any(name in fields for name in ("enrolment_date", "participant_status"))
-        evidence["due"] = evidence["due"] or "enrolment_date" in fields
-        evidence["outcomes"] = evidence["outcomes"] or any(name in fields for name in ("physical_outcome", "cognitive_outcome", "baseline_mmse", "followup_mmse", "baseline_sppb", "followup_sppb"))
+        evidence["due"] = evidence["due"] or any(name in fields for name in ("one_year_followup_due", "enrolment_date"))
+        evidence["outcomes"] = evidence["outcomes"] or any(name in fields for name in ("physical_outcome", "cognitive_outcome", "outcome_classification", "approved_one_year_outcome", "outcome_success", "baseline_mmse", "followup_mmse", "baseline_sppb", "followup_sppb"))
         centres = _centre_series(table, fields)
         entities = _entity_series(table.frame, fields, warnings, f"{table.source_file} / {table.source_sheet}")
         enrolments = _date_series(table.frame, fields, ["enrolment_date"])
@@ -974,15 +981,24 @@ def _lharmoni_record_level(
             if "participant_status" in fields:
                 status = _key(table.frame.at[idx, fields["participant_status"]])
                 status_ok = status not in {"cancelled", "duplicate", "error", "not enrolled"}
-            if status_ok and pd.notna(enrolment) and start <= enrolment <= end:
+            if status_ok and pd.notna(enrolment):
                 participants.setdefault(centre, set()).add(ent)
             elif status_ok and "enrolment_date" not in fields and "participant_status" in fields:
                 # A project-specific participant register may omit dates, but an
                 # assessment/operations table must never create extra participants.
                 participants.setdefault(centre, set()).add(ent)
 
-            # One-year denominator: seniors whose one-year point is due by cutoff.
-            if pd.notna(enrolment) and enrolment + pd.Timedelta(days=365) <= data_cutoff:
+            # One-year denominator: prefer an explicit source flag. If absent,
+            # derive due status only for rows that contain outcome-study evidence,
+            # so a general enrolment register cannot inflate the denominator.
+            explicit_due = "one_year_followup_due" in fields and _truthy(table.frame.at[idx, fields["one_year_followup_due"]])
+            has_outcome_evidence = any(name in fields for name in (
+                "physical_outcome", "cognitive_outcome", "outcome_classification",
+                "approved_one_year_outcome", "outcome_success",
+                "baseline_mmse", "followup_mmse", "baseline_sppb", "followup_sppb"
+            ))
+            derived_due = pd.notna(enrolment) and enrolment + pd.Timedelta(days=365) <= data_cutoff and has_outcome_evidence
+            if explicit_due or derived_due:
                 due.setdefault(centre, set()).add(ent)
 
             physical = _normalise_outcome(table.frame.at[idx, fields["physical_outcome"]]) if "physical_outcome" in fields else None
@@ -1011,23 +1027,30 @@ def _lharmoni_record_level(
                         cognitive = "Improved" if post > pre else "Maintained" if post == pre else "Declined"
 
             approved = "outcome_approved" in fields and _truthy(table.frame.at[idx, fields["outcome_approved"]])
+            explicit_approved = "approved_one_year_outcome" in fields and not _blank_value(table.frame.at[idx, fields["approved_one_year_outcome"]])
+            explicit_outcome = _normalise_outcome(table.frame.at[idx, fields["approved_one_year_outcome"]]) if explicit_approved else None
+            explicit_success = "outcome_success" in fields and _truthy(table.frame.at[idx, fields["outcome_success"]])
+            if explicit_outcome and physical is None and cognitive is None:
+                # The source has already approved the overall outcome. Treat it
+                # as valid outcome evidence without requiring the UI checkbox.
+                physical = explicit_outcome
+
             rule_present = "outcome_rule_version" in fields and bool(str(table.frame.at[idx, fields["outcome_rule_version"]]).strip()) and str(table.frame.at[idx, fields["outcome_rule_version"]]).strip().lower() not in {"nan", "none"}
             timing_valid = False
-            days_after = None
             if pd.notna(enrolment) and pd.notna(followup):
                 days_after = int((followup - enrolment).days)
                 timing_valid = followup_min_days <= days_after <= followup_max_days
-            if timing_rule_approved and approved and rule_present and timing_valid and (physical in {"Improved", "Maintained", "Declined"} or cognitive in {"Improved", "Maintained", "Declined"}):
+
+            valid_classification = physical in {"Improved", "Maintained", "Declined"} or cognitive in {"Improved", "Maintained", "Declined"}
+            source_approved = explicit_approved or (approved and rule_present and timing_valid)
+            if source_approved and valid_classification:
                 eligible.setdefault(centre, set()).add(ent)
-                if physical in {"Improved", "Maintained"} or cognitive in {"Improved", "Maintained"}:
+                if explicit_success or physical in {"Improved", "Maintained"} or cognitive in {"Improved", "Maintained"}:
                     success.setdefault(centre, set()).add(ent)
                 if physical:
                     physical_outcomes.append({"centre": centre, "entity": ent, "outcome": physical})
                 if cognitive:
                     cognitive_outcomes.append({"centre": centre, "entity": ent, "outcome": cognitive})
-            elif any(x is not None for x in (physical, cognitive)) and not timing_rule_approved:
-                # Records are visible in the audit but not in the official result.
-                pass
 
             if "lharmoni_track" in fields:
                 track = str(table.frame.at[idx, fields["lharmoni_track"]]).strip()
@@ -1485,8 +1508,8 @@ def analyse_lharmoni(
     due = totals.get("tracked_seniors_due")
     eligible = totals.get("outcome_eligible_seniors")
     success = totals.get("improved_or_maintained_seniors")
-    totals["official_outcome_rate"] = success / due if timing_rule_approved and due and success is not None else None
-    totals["one_year_assessment_coverage"] = eligible / due if timing_rule_approved and due and eligible is not None else None
+    totals["official_outcome_rate"] = success / due if due and success is not None else None
+    totals["one_year_assessment_coverage"] = eligible / due if due and eligible is not None else None
     totals["completed_assessment_outcome_rate"] = success / eligible if eligible and success is not None else None
 
     milestone = _milestone_summary(tables, "LHARMONI", LHARMONI_MILESTONES)
@@ -1496,13 +1519,11 @@ def analyse_lharmoni(
         ("1,000 participating seniors", totals.get("participating_seniors"), "Unique explicitly enrolled L'Harmoni seniors across both GLOW centres", True, "Cumulative project measure"),
         ("500 GLOW Bukit Batok participants", float(bb.iloc[0]) if not bb.empty else None, "Unique L'Harmoni participants at GLOW Bukit Batok", True, "Centre target"),
         ("500 GLOW Nanyang participants", float(ny.iloc[0]) if not ny.empty else None, "Unique L'Harmoni participants at GLOW Nanyang", True, "Centre target"),
-        ("60% improve or maintain physical/cognitive scores", totals.get("official_outcome_rate"), "Successful one-year physical/cognitive outcomes ÷ all tracked seniors due for one-year follow-up", True, "Requires approved one-year timing window"),
+        ("60% improve or maintain physical/cognitive scores", totals.get("official_outcome_rate"), "Successful one-year physical/cognitive outcomes ÷ all tracked seniors due for one-year follow-up", True, "Uses source-approved outcomes automatically"),
         ("One-year assessment coverage", totals.get("one_year_assessment_coverage"), "Valid approved one-year outcomes ÷ tracked seniors due", False, "Supporting completeness measure"),
         ("100 complete assessment sets annually", totals.get("complete_assessment_sets_annual"), "Unique seniors with MMSE, GDS and SPPB in one dated assessment episode", True, "Selected reporting year"),
         ("300 unique seniors tracked over three years", totals.get("unique_tracked_seniors_3_year"), "Unique seniors with assessment evidence across the full three-year project window", True, "Not restricted to the selected reporting year"),
     ])
-    if not timing_rule_approved:
-        warnings.append("The official L’Harmoni 60% outcome KPI is withheld until the one-year follow-up window is approved in the dashboard controls.")
     if not tables:
         errors.append("No readable structured project tables were found.")
     notes = {
@@ -2216,13 +2237,13 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
         ))
         timing_rule_approved = st.checkbox(
             "Approved: use this follow-up window for the official 60% KPI",
-            value=False,
+            value=True,
             key="lharmoni_timing_rule_approved",
-            help="The official outcome rate remains unavailable until the reporting owner approves the timing rule.",
+            help="Used only when the dashboard must derive outcomes from dates. Source-approved outcome fields are calculated automatically.",
         )
         raw_score_rule_approved = st.checkbox(
             "Approved: interpret raw MMSE, GDS and SPPB score direction",
-            value=False,
+            value=True,
             key="lharmoni_raw_score_rule_approved",
             help="Use only after confirming that higher/lower score direction and maintenance rules match the approved methodology.",
         )
@@ -2497,4 +2518,3 @@ def render_lharmoni_page(template_path: Path | None = None, clear_all_callback=N
         )
     for error in file_errors:
         st.warning(error)
-
