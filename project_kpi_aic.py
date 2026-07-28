@@ -175,9 +175,14 @@ ALIASES: dict[str, list[str]] = {
     "outcome_success": ["outcome successful", "successful outcome", "outcome success", "improved or maintained", "improved/maintained", "positive outcome"],
     "outcome_rule_version": ["outcome rule version", "rule version", "classification rule", "outcome definition version"],
     "baseline_mmse": ["baseline mmse", "pre mmse", "mmse pre", "pre mmse score"],
-    "followup_mmse": ["followup mmse", "post mmse", "mmse post", "post mmse score"],
+    "baseline_gds": ["baseline gds", "pre gds", "gds pre", "pre gds score"],
+    "followup_mmse": ["followup mmse", "follow up mmse", "one year mmse", "one-year mmse", "post mmse", "mmse post", "post mmse score"],
+    "followup_gds": ["followup gds", "follow up gds", "one year gds", "one-year gds", "post gds", "gds post", "post gds score"],
     "baseline_sppb": ["baseline sppb", "pre sppb", "sppb pre", "pre sppb score"],
-    "followup_sppb": ["followup sppb", "post sppb", "sppb post", "post sppb score"],
+    "followup_sppb": ["followup sppb", "follow up sppb", "one year sppb", "one-year sppb", "post sppb", "sppb post", "post sppb score"],
+    "mmse_completed": ["mmse completed", "completed mmse", "mmse completion", "mmse done"],
+    "gds_completed": ["gds completed", "completed gds", "gds completion", "gds done"],
+    "sppb_completed": ["sppb completed", "completed sppb", "sppb completion", "sppb done"],
     "lharmoni_track": ["lharmoni track", "l harmoni track", "programme track", "program track", "track"],
     "sessions_attended": ["sessions attended", "attendance sessions", "number of sessions attended", "sessions completed"],
     "sessions_per_week": ["sessions per week", "weekly sessions", "sessions weekly", "weekly session frequency"],
@@ -631,120 +636,171 @@ def _assessment_records(
     allowed_centres: set[str],
     warnings: list[str],
 ) -> tuple[pd.DataFrame, dict[str, set[str]], dict[str, set[str]]]:
-    """Return annual complete-set summary and person sets.
+    """Calculate annual MMSE/GDS/SPPB coverage from flexible source layouts.
 
-    A complete set must belong to one assessment episode. The episode key is:
-    explicit episode ID when supplied, otherwise the exact assessment date.
-    Records without either are not combined across a reporting year.
+    Supported layouts:
+    - one row containing MMSE, GDS and SPPB scores;
+    - baseline/follow-up score columns, including one-year column names;
+    - explicit ``MMSE Completed`` / ``GDS Completed`` / ``SPPB Completed`` flags;
+    - an explicit ``Complete Assessment Set`` flag;
+    - long-format rows containing Assessment Type and Assessment Date.
+
+    Once an assessment table is recognised, an absent instrument is reported as
+    zero rather than ``Data unavailable``. ``Data unavailable`` is reserved for
+    cases where no assessment evidence exists anywhere in the uploaded files.
     """
-    annual_complete_by_centre: dict[str, set[str]] = {}
-    annual_instrument_by_centre: dict[str, dict[str, set[str]]] = {}
-    tracked_by_centre: dict[str, set[str]] = {}
-    long_rows: list[dict[str, Any]] = []
-    wide_rows: list[dict[str, Any]] = []
-    instrument_evidence = {"mmse": False, "gds": False, "sppb": False}
+    annual_instruments: dict[str, dict[str, set[str]]] = {
+        centre: {"mmse": set(), "gds": set(), "sppb": set()} for centre in allowed_centres
+    }
+    annual_complete: dict[str, set[str]] = {centre: set() for centre in allowed_centres}
+    tracked: dict[str, set[str]] = {centre: set() for centre in allowed_centres}
+    episode_map: dict[tuple[str, str, str], set[str]] = {}
+    episode_years: dict[tuple[str, str, str], set[int]] = {}
     any_assessment_evidence = False
-    start, end = _project_window(project_start_year)
+    start_date, end_date = _project_window(project_start_year)
+
+    score_fields = {
+        "mmse": ("mmse", "baseline_mmse", "followup_mmse"),
+        "gds": ("gds", "baseline_gds", "followup_gds"),
+        "sppb": ("sppb", "baseline_sppb", "followup_sppb"),
+    }
+    completion_fields = {
+        "mmse": "mmse_completed",
+        "gds": "gds_completed",
+        "sppb": "sppb_completed",
+    }
 
     for table in tables:
         fields = detect_fields(table.frame)
-        if not any(name in fields for name in ("assessment_type", "mmse", "gds", "sppb", "baseline_mmse", "followup_mmse", "baseline_sppb", "followup_sppb")):
+        recognised = {
+            "assessment_type", "assessment_date", "assessment_episode_id",
+            "complete_assessment_set", "mmse_completed", "gds_completed", "sppb_completed",
+            "mmse", "gds", "sppb", "baseline_mmse", "followup_mmse",
+            "baseline_gds", "followup_gds", "baseline_sppb", "followup_sppb",
+        }.intersection(fields)
+        if not recognised:
             continue
+
         mask = _project_mask(table, fields, project)
-        if mask.any():
-            any_assessment_evidence = True
-            for instrument in ("mmse", "gds", "sppb"):
-                instrument_evidence[instrument] = instrument_evidence[instrument] or instrument in fields
-            if "assessment_type" in fields:
-                values = table.frame.loc[mask, fields["assessment_type"]].astype(str).map(_key)
-                instrument_evidence["mmse"] = instrument_evidence["mmse"] or values.str.contains("mmse|mental state", regex=True).any()
-                instrument_evidence["gds"] = instrument_evidence["gds"] or values.str.contains("gds|depression", regex=True).any()
-                instrument_evidence["sppb"] = instrument_evidence["sppb"] or values.str.contains("sppb|physical performance", regex=True).any()
+        if not mask.any():
+            continue
+        any_assessment_evidence = True
+
         centres = _centre_series(table, fields)
         entities = _entity_series(table.frame, fields, warnings, f"{table.source_file} / {table.source_sheet}")
-        dates = _date_series(table.frame, fields, ["assessment_date", "record_date", "followup_date", "baseline_date"])
-        episodes = table.frame[fields["assessment_episode_id"]].astype(str).str.strip() if "assessment_episode_id" in fields else pd.Series("", index=table.frame.index)
+        assessment_dates = _date_series(table.frame, fields, ["assessment_date", "followup_date", "baseline_date", "record_date", "reporting_date"])
+        baseline_dates = _date_series(table.frame, fields, ["baseline_date", "assessment_date", "record_date"])
+        followup_dates = _date_series(table.frame, fields, ["followup_date", "assessment_date", "record_date"])
+
+        if "assessment_episode_id" in fields:
+            episodes = table.frame[fields["assessment_episode_id"]].fillna("").astype(str).str.strip()
+        else:
+            episodes = pd.Series("", index=table.frame.index, dtype="object")
+
         for idx in table.frame.index[mask]:
             centre = centres.loc[idx]
             entity = entities.loc[idx]
-            when = dates.loc[idx]
             if centre not in allowed_centres or pd.isna(entity):
                 continue
-            if pd.notna(when) and start <= when <= end:
-                tracked_by_centre.setdefault(centre, set()).add(str(entity))
-            # Wide-format scores.
-            present = {
-                instrument: fields.get(instrument) and pd.notna(pd.to_numeric(pd.Series([table.frame.at[idx, fields[instrument]]]), errors="coerce").iloc[0])
-                for instrument in ("mmse", "gds", "sppb")
-            }
-            if any(present.values()):
-                if pd.isna(when):
-                    warnings.append(f"{table.source_file} / {table.source_sheet}: an assessment row for {entity} had scores but no assessment date; it was not counted as an annual set.")
-                else:
-                    episode = episodes.loc[idx] if episodes.loc[idx] and episodes.loc[idx].lower() not in {"nan", "none"} else when.date().isoformat()
-                    wide_rows.append({"centre": centre, "entity": str(entity), "date": when, "episode": episode, **present})
-            # Long-format assessment rows.
+            ent = str(entity)
+            row_date = assessment_dates.loc[idx]
+            base_date = baseline_dates.loc[idx]
+            follow_date = followup_dates.loc[idx]
+            relevant_dates = [d for d in (row_date, base_date, follow_date) if pd.notna(d)]
+
+            if any(start_date <= d <= end_date for d in relevant_dates) or not relevant_dates:
+                tracked[centre].add(ent)
+
+            annual_row = any(int(d.year) == reporting_year for d in relevant_dates)
+            # Dedicated assessment exports sometimes omit dates. Include them in
+            # the selected reporting year, but surface the assumption clearly.
+            if not relevant_dates:
+                annual_row = True
+                warnings.append(
+                    f"{table.source_file} / {table.source_sheet}: assessment data for {ent} had no usable date and was included in {reporting_year}."
+                )
+
+            present: set[str] = set()
+            for instrument, candidates in score_fields.items():
+                for canonical in candidates:
+                    col = fields.get(canonical)
+                    if col and pd.notna(pd.to_numeric(pd.Series([table.frame.at[idx, col]]), errors="coerce").iloc[0]):
+                        present.add(instrument)
+                        break
+                flag_col = fields.get(completion_fields[instrument])
+                if flag_col and _truthy(table.frame.at[idx, flag_col]):
+                    present.add(instrument)
+
+            # Long-format assessment type can provide instrument evidence even
+            # when the score is stored in a non-standard value column.
             if "assessment_type" in fields:
-                instrument = _key(table.frame.at[idx, fields["assessment_type"]])
-                canonical = None
-                if "mmse" in instrument or "mental state" in instrument:
-                    canonical = "mmse"
-                elif "gds" in instrument or "depression" in instrument:
-                    canonical = "gds"
-                elif "sppb" in instrument or "physical performance" in instrument:
-                    canonical = "sppb"
-                if canonical:
-                    if pd.isna(when):
-                        warnings.append(f"{table.source_file} / {table.source_sheet}: a {canonical.upper()} record for {entity} had no assessment date and was excluded from the annual set count.")
-                    else:
-                        episode = episodes.loc[idx] if episodes.loc[idx] and episodes.loc[idx].lower() not in {"nan", "none"} else when.date().isoformat()
-                        long_rows.append({"centre": centre, "entity": str(entity), "date": when, "episode": episode, "instrument": canonical})
+                assessment_type = _key(table.frame.at[idx, fields["assessment_type"]])
+                if "mmse" in assessment_type or "mental state" in assessment_type:
+                    present.add("mmse")
+                elif "gds" in assessment_type or "depression" in assessment_type:
+                    present.add("gds")
+                elif "sppb" in assessment_type or "physical performance" in assessment_type:
+                    present.add("sppb")
 
-    # Build instrument sets by exact episode.
-    episode_map: dict[tuple[str, str, str], set[str]] = {}
-    for row in wide_rows:
-        key = (row["centre"], row["entity"], str(row["episode"]))
-        episode_map.setdefault(key, set()).update({i for i in ("mmse", "gds", "sppb") if row[i]})
-        if int(row["date"].year) == reporting_year:
-            for instrument in ("mmse", "gds", "sppb"):
-                if row[instrument]:
-                    annual_instrument_by_centre.setdefault(row["centre"], {}).setdefault(instrument, set()).add(row["entity"])
-    for row in long_rows:
-        key = (row["centre"], row["entity"], str(row["episode"]))
-        episode_map.setdefault(key, set()).add(row["instrument"])
-        if int(row["date"].year) == reporting_year:
-            annual_instrument_by_centre.setdefault(row["centre"], {}).setdefault(row["instrument"], set()).add(row["entity"])
+            if annual_row:
+                for instrument in present:
+                    annual_instruments[centre][instrument].add(ent)
 
-    for (centre, entity, episode), instruments in episode_map.items():
-        # Episode strings derived from dates are guaranteed annual; explicit IDs need
-        # a matching annual row. Check source rows to avoid cross-year reuse.
-        episode_dates = [r["date"] for r in wide_rows if r["centre"] == centre and r["entity"] == entity and str(r["episode"]) == episode]
-        episode_dates += [r["date"] for r in long_rows if r["centre"] == centre and r["entity"] == entity and str(r["episode"]) == episode]
-        if episode_dates and any(int(d.year) == reporting_year for d in episode_dates) and {"mmse", "gds", "sppb"}.issubset(instruments):
-            annual_complete_by_centre.setdefault(centre, set()).add(entity)
+            explicit_complete = False
+            complete_col = fields.get("complete_assessment_set")
+            if complete_col:
+                explicit_complete = _truthy(table.frame.at[idx, complete_col])
+            if annual_row and (explicit_complete or {"mmse", "gds", "sppb"}.issubset(present)):
+                annual_complete[centre].add(ent)
 
-    rows = []
+            # Group long-format rows into dated/explicit episodes and count a
+            # complete set only when all three instruments belong together.
+            episode = episodes.loc[idx]
+            if not episode or episode.lower() in {"nan", "none", "null"}:
+                episode = row_date.date().isoformat() if pd.notna(row_date) else f"row-{idx}"
+            key = (centre, ent, str(episode))
+            episode_map.setdefault(key, set()).update(present)
+            if relevant_dates:
+                episode_years.setdefault(key, set()).update(int(d.year) for d in relevant_dates)
+            elif annual_row:
+                episode_years.setdefault(key, set()).add(reporting_year)
+
+    for (centre, ent, episode), instruments in episode_map.items():
+        if reporting_year in episode_years.get((centre, ent, episode), set()) and {"mmse", "gds", "sppb"}.issubset(instruments):
+            annual_complete[centre].add(ent)
+
+    rows: list[dict[str, Any]] = []
     for centre in sorted(allowed_centres):
-        instruments = annual_instrument_by_centre.get(centre, {})
-        rows.append({
-            "centre": centre,
-            "mmse_completed_annual": len(instruments.get("mmse", set())) if instrument_evidence["mmse"] else np.nan,
-            "gds_completed_annual": len(instruments.get("gds", set())) if instrument_evidence["gds"] else np.nan,
-            "sppb_completed_annual": len(instruments.get("sppb", set())) if instrument_evidence["sppb"] else np.nan,
-            "complete_assessment_sets_annual": len(annual_complete_by_centre.get(centre, set())) if all(instrument_evidence.values()) else np.nan,
-            "unique_tracked_seniors_3_year": len(tracked_by_centre.get(centre, set())) if any_assessment_evidence else np.nan,
-        })
+        if any_assessment_evidence:
+            rows.append({
+                "centre": centre,
+                "mmse_completed_annual": len(annual_instruments[centre]["mmse"]),
+                "gds_completed_annual": len(annual_instruments[centre]["gds"]),
+                "sppb_completed_annual": len(annual_instruments[centre]["sppb"]),
+                "complete_assessment_sets_annual": len(annual_complete[centre]),
+                "unique_tracked_seniors_3_year": len(tracked[centre]),
+            })
+        else:
+            rows.append({
+                "centre": centre,
+                "mmse_completed_annual": np.nan,
+                "gds_completed_annual": np.nan,
+                "sppb_completed_annual": np.nan,
+                "complete_assessment_sets_annual": np.nan,
+                "unique_tracked_seniors_3_year": np.nan,
+            })
+
     total_sets = {
-        "annual_complete": set().union(*annual_complete_by_centre.values()) if annual_complete_by_centre else set(),
-        "three_year_tracked": set().union(*tracked_by_centre.values()) if tracked_by_centre else set(),
-        "tracked_by_centre": tracked_by_centre,
+        "annual_complete": set().union(*annual_complete.values()) if any_assessment_evidence else set(),
+        "three_year_tracked": set().union(*tracked.values()) if any_assessment_evidence else set(),
+        "tracked_by_centre": tracked,
     }
     instrument_totals = {
-        instrument: set().union(*[m.get(instrument, set()) for m in annual_instrument_by_centre.values()]) if annual_instrument_by_centre else set()
+        instrument: set().union(*(annual_instruments[c][instrument] for c in annual_instruments))
+        if any_assessment_evidence else set()
         for instrument in ("mmse", "gds", "sppb")
     }
     return pd.DataFrame(rows), total_sets, instrument_totals
-
 
 def _beneficiary_type(value: Any) -> str | None:
     text = _key(value)
