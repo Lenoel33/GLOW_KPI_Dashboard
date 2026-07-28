@@ -1,0 +1,13 @@
+Test source: L'harmoni1.xlsx
+Detected participant field: Name
+Detected centre field: Centres
+Rule applied:
+- Contains Bukit Batok -> GLOW Bukit Batok
+- Contains Nanyang -> GLOW Nanyang
+
+Verified unique cleaned-name counts:
+- Combined unique participants: 3,601
+- GLOW Bukit Batok participants: 2,134
+- GLOW Nanyang participants: 1,550
+
+The combined value is deduplicated across both centres, so it is not expected to equal the sum of the two centre totals when a person appears at both centres.

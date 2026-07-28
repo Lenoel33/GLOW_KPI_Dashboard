@@ -1,0 +1,21 @@
+L'Harmoni complete crash and calculation fix
+
+Verified with L'harmoni1.xlsx:
+- Total attendance rows: 65,815
+- Combined unique names: 3,601
+- GLOW Bukit Batok attendances: 30,541
+- GLOW Bukit Batok unique participants: 2,134
+- GLOW Nanyang attendances: 35,274
+- GLOW Nanyang unique participants: 1,550
+- Unassigned rows: 0
+
+Code changes:
+- Removed all table.data access from the L'Harmoni page.
+- Added a typed analyse_lharmoni_combined_tables() function.
+- Uses SourceTable.frame only, matching read_project_files().
+- Uses Name/Display Name for participant deduplication.
+- Uses the exact Centres field first.
+- Centres containing Bukit Batok -> GLOW Bukit Batok.
+- Centres containing Nanyang -> GLOW Nanyang.
+- Ambiguous or unmatched rows are reported and never silently assigned.
+- Total participants are deduplicated across both centres.

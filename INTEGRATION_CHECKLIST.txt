@@ -1,0 +1,17 @@
+GLOW KPI Dashboard CST/AIC Integration Checklist
+
+[ ] Copy cst_kpi_core.py to repository root
+[ ] Copy pages/2_CST_Project_KPIs.py into pages/
+[ ] Copy templates/CST_KPI_Data_Template.xlsx into templates/
+[ ] Copy tests/test_cst_kpi_core.py into tests/
+[ ] Confirm the app starts locally or on Streamlit Cloud
+[ ] Confirm the new CST Project KPIs page appears in navigation
+[ ] Download and open the controlled template
+[ ] Test upload with non-production sample data
+[ ] Confirm unknown centres are rejected
+[ ] Confirm SEEN L'Harmoni records are rejected
+[ ] Confirm missing source sheets block official export
+[ ] Obtain written approval of the operational centre mapping
+[ ] Obtain approval of the APRIL risk denominator definition
+[ ] Obtain approval of the L'Harmoni outcome/follow-up rule and version
+[ ] Reconcile every official export to source records before sending to AIC

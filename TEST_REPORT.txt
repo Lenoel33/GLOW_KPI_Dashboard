@@ -1,0 +1,18 @@
+VALIDATION COMPLETED
+
+- Python syntax compilation passed for app.py, project_kpi_aic.py, and utils.py.
+- 11 automated unit tests passed.
+- Existing 3 utility tests passed.
+- New project tests cover:
+  * APRIL all-four-centre scope
+  * official all-flagged APRIL denominator
+  * assessment-evidence validation requirement
+  * annual versus three-year cohort separation
+  * same-episode MMSE/GDS/SPPB rule
+  * annual beneficiaries
+  * L’Harmoni two-GLOW-centre scope
+  * one-year follow-up timing
+  * physical/cognitive-only outcome rule
+  * no automatic No Change = Maintained mapping
+  * unrelated attendance remains Data unavailable
+- The included mock workbook was parsed with the final calculation engine and matched its expected official totals.
