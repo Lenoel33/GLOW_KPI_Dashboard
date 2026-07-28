@@ -98,7 +98,7 @@ def _compact(value: Any) -> str:
 
 ALIASES: dict[str, list[str]] = {
     # Common identity and audit fields
-    "centre": ["centre", "center", "centre name", "center name", "site", "location", "branch", "aac centre", "service centre"],
+    "centre": ["centre", "centres", "center", "centers", "centre name", "center name", "site", "location", "branch", "aac centre", "service centre"],
     "project": ["project", "project name", "initiative", "programme", "program", "programme name", "program name", "activity", "activity name", "event", "event name"],
     "reporting_date": ["reporting date", "as at date", "as of date", "data cut off date", "data cutoff date", "cut off date", "cutoff date", "report date"],
     "record_date": ["date", "record date", "activity date", "session date", "engagement date", "created on", "created date"],
@@ -423,9 +423,9 @@ def _normalise_person_name(value: Any) -> str | pd._libs.missing.NAType:
     """
     if pd.isna(value):
         return pd.NA
-    text = str(value).strip().lower()
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"[^a-z0-9\s]", "", text)
+    import unicodedata
+    text = unicodedata.normalize("NFKC", str(value)).strip().casefold()
+    text = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in text)
     text = re.sub(r"\s+", " ", text).strip()
     return pd.NA if text in {"", "nan", "none", "null", "na"} else text
 
